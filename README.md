@@ -36,17 +36,18 @@ tests/                     claude-p handoff tests
 codex plugin marketplace add filipgutica/codex-claude-plugin
 ```
 
-Then restart Codex, open the plugin directory, and install `claude-plugin` from
+Then restart Codex, open Codex's plugin UI, and install `claude-plugin` from
 the `codex-claude-plugin` marketplace.
 
 Codex reads `.agents/plugins/marketplace.json` at the repo root, which lists
 `claude-plugin` and points its source path at `./plugins/claude-plugin`.
 
-Codex marketplace commands target the marketplace name directly, so the upgrade
-command uses `codex-claude-plugin` rather than a `plugin@marketplace`
-identifier.
+Codex's CLI only manages marketplace registration and refreshes; plugin
+installation happens from Codex's plugin UI. Marketplace commands target the
+marketplace name directly, so the upgrade command uses `codex-claude-plugin`
+rather than a `plugin@marketplace` identifier.
 
-Updates are automatic: when a new version is released, run:
+When a new version is released, refresh the marketplace with:
 
 ```sh
 codex plugin marketplace upgrade codex-claude-plugin

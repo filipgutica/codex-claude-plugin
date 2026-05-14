@@ -62,11 +62,55 @@ const readDirectoryNames = async (path) => (
   .map((entry) => entry.name)
   .sort()
 
+const assetMatchesPath = (asset, path) => {
+  if (asset === path) return true
+
+  const assetParts = asset.split('/')
+  const pathParts = path.split('/')
+  return assetParts.length === pathParts.length
+    && assetParts.every((part, index) => part === '*' || part === pathParts[index])
+}
+
+const findSemanticReleaseGitConfig = (plugins) => plugins.find((plugin) => (
+  Array.isArray(plugin) && plugin[0] === '@semantic-release/git'
+))
+
+const getSemanticReleaseGitAssets = (releaseConfig) => {
+  const gitPluginConfig = findSemanticReleaseGitConfig(releaseConfig.plugins)
+  const assets = gitPluginConfig?.[1]?.assets
+  return Array.isArray(assets) ? assets : null
+}
+
+const buildStampedFiles = (pluginDirs) => [
+  ...pluginDirs.map((pluginDir) => `plugins/${pluginDir}/.codex-plugin/plugin.json`),
+  '.agents/plugins/marketplace.json',
+]
+
+const validateStampedFileAsset = (assets, stampedFile) => {
+  if (assets.some((asset) => typeof asset === 'string' && assetMatchesPath(asset, stampedFile))) return
+  fail(`.releaserc.json @semantic-release/git assets must include stamped file: ${stampedFile}`)
+}
+
+const validateStampedReleaseAssets = async (pluginDirs) => {
+  const releaseConfig = await validateJson(join(repoRoot, '.releaserc.json'), ['plugins'])
+  if (releaseConfig === null) return
+
+  const assets = getSemanticReleaseGitAssets(releaseConfig)
+  if (!Array.isArray(assets)) {
+    fail('.releaserc.json is missing @semantic-release/git assets')
+    return
+  }
+
+  buildStampedFiles(pluginDirs).forEach((stampedFile) => validateStampedFileAsset(assets, stampedFile))
+}
+
 console.log('Validating plugin manifests...')
 
 await validateJson(join(repoRoot, '.agents/plugins/marketplace.json'), ['name', 'plugins'])
 
 const pluginDirs = await readDirectoryNames(pluginsRoot)
+
+await validateStampedReleaseAssets(pluginDirs)
 
 for (const pluginDir of pluginDirs) {
   const pluginRoot = join(pluginsRoot, pluginDir)
