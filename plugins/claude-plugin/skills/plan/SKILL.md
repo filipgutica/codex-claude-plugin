@@ -24,8 +24,12 @@ printf '%s' "<prompt>" | node plugins/claude-plugin/scripts/claude-tui-adviser.m
    readiness, prompt entry, `Stop` hook completion, and transcript extraction.
    The helper keeps the plugin contract small by using `npx -y claude-p` as the
    single execution path and normalizing its JSON result into a Codex handoff.
-   Run this command outside Codex's default sandbox when sandboxing blocks
-   Claude auth, keychain, or TUI startup.
+   Run this command outside Codex's default sandbox. It invokes `npx`,
+   `claude-p`, and the local Claude TUI, which may need package resolution,
+   PTY support, Claude auth, keychain/session files, and home-directory access
+   that the sandbox can block. In Codex, use the shell tool's escalation or
+   approval path for this helper command instead of retrying inside the default
+   workspace sandbox.
 3. Ask Claude for a concise implementation plan grounded in the current repo.
    Include any known constraints, files, test expectations, and open questions.
 4. Read the returned handoff JSON critically. Do not treat it as authoritative.
@@ -53,5 +57,5 @@ files.
 ## Failure Handling
 
 If `npx`, the `claude-p` package, or `claude` is unavailable, Claude is not
-authenticated, the TUI times out, or the helper fails, report the failure and
-continue with Codex's own planning instead of blocking.
+authenticated, the TUI times out, or the helper fails even outside the sandbox,
+report the failure and continue with Codex's own planning instead of blocking.
