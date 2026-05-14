@@ -1,0 +1,15 @@
+{
+  "branches": ["main"],
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    "@semantic-release/changelog",
+    ["@semantic-release/npm", { "npmPublish": false }],
+    ["@semantic-release/exec", { "prepareCmd": "node scripts/stamp-version.mjs" }],
+    ["@semantic-release/git", {
+      "assets": ["CHANGELOG.md", "package.json", "plugins/*/.codex-plugin/plugin.json", ".agents/plugins/marketplace.json"],
+      "message": "chore(release): ${nextRelease.version} [skip ci]"
+    }],
+    "@semantic-release/github"
+  ]
+}

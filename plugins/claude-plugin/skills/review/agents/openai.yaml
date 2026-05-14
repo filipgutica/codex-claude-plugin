@@ -1,0 +1,6 @@
+interface:
+  display_name: "Claude Review"
+  short_description: "Ask Claude TUI to review current changes"
+  default_prompt: "Use $claude-plugin:review to ask Claude TUI to review the current changes."
+policy:
+  allow_implicit_invocation: false
