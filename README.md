@@ -5,9 +5,10 @@ planning and review passes.
 
 ## Distribution Model
 
-This repo is a git-based Codex marketplace. No build step is required for the
-plugin payload: the Codex plugin files are tracked directly in git and
-versioned on release.
+This repo is a git-based Codex marketplace. Consumers do not run a build step
+after installing the plugin: the Codex plugin payload is tracked directly in git
+and versioned on release. Development changes to the TypeScript runtime must be
+compiled before commit so the tracked plugin script stays current.
 
 The marketplace ships one plugin:
 
@@ -24,10 +25,11 @@ correctness, and implementation decisions.
 plugins/claude-plugin/     Codex-only Claude CLI adviser plugin
   .codex-plugin/           Codex plugin manifest
   skills/                  plan and review skills
-  scripts/                 claude-p launcher and JSON handoff runtime
+  src/                     TypeScript source for the local TUI runtime
+  scripts/                 compiled local TUI runtime and JSON handoff helper
 .agents/plugins/           Codex git marketplace registry (marketplace.json)
 scripts/                   Stamp and validate scripts
-tests/                     claude-p handoff tests
+tests/                     Claude TUI handoff tests
 ```
 
 ## Codex Install
@@ -82,20 +84,26 @@ version commands needed.
 
 The `claude-plugin` Codex plugin includes:
 
-- `plan` - invokes `claude-p` for an ephemeral read-only Claude TUI session and
-  folds the JSON handoff into Codex's own plan after validation.
-- `review` - uses the same `claude-p` path for advisory code review, then has
+- `plan` - invokes the local Claude TUI runtime for an ephemeral read-only
+  Claude session and folds the JSON handoff into Codex's own plan after
+  validation.
+- `review` - uses the same local TUI runtime for advisory code review, then has
   Codex validate and separate confirmed, rejected, and actionable findings.
 
-The Claude adviser helper intentionally avoids `claude -p` by running
-[`npx -y claude-p`](https://github.com/smithersai/claude-p) as its single
-execution path. `claude-p` runs the local Claude CLI in interactive mode with a
-real PTY, handles terminal startup probes, waits for `SessionStart`, sends the
-prompt, waits for `Stop`, and emits JSON compatible with
-`claude -p --output-format json`. The helper normalizes that result into a
-Codex handoff. If Codex sandboxing blocks package resolution, Claude auth,
-keychain access, or TUI startup, run the helper outside the default sandbox and
-let Codex continue with its own plan or review if the handoff fails.
+The Claude adviser helper intentionally avoids `claude -p` and external PTY
+wrappers. It runs the authenticated local Claude CLI in interactive mode inside
+a required local `tmux` session, waits for Claude lifecycle hooks, reads the
+final assistant answer from Claude's persisted transcript, and normalizes that
+result into a Codex handoff. If Codex sandboxing blocks `tmux`, Claude auth,
+keychain access, session files, or TUI startup, run the helper outside the
+default sandbox and let Codex continue with its own plan or review if the
+handoff fails.
+
+Runtime requirements:
+
+- Claude Code CLI available as `claude` on `PATH` and already authenticated
+- `tmux` available on `PATH`
+- Node.js 20.16 or newer
 
 ## CI
 
@@ -107,7 +115,8 @@ let Codex continue with its own plan or review if the handoff fails.
 ## Development
 
 ```sh
+pnpm build:runtime
 pnpm validate-plugins
 pnpm test
-pnpm check          # validate plugin manifests + tests
+pnpm check          # build runtime, validate plugin manifests, and run tests
 ```
