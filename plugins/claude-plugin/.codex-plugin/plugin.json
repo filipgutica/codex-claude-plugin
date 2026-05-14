@@ -1,6 +1,6 @@
 {
   "name": "claude-plugin",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "User-invoked Claude TUI planning and review adviser for Codex.",
   "author": {
     "name": "Filip Gutica"
