@@ -1,27 +1,34 @@
 // fallow-ignore-file unused-file
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
-  buildClaudePArgs,
-  buildClaudePInvocation,
+  buildClaudeArgs,
   buildClaudePrompt,
+  buildHandoff,
+  buildTmuxStartInvocation,
   classifyLaunchFailure,
+  findDirectClaudeTranscriptPath,
+  findClaudeTranscriptPath,
   parseArgs,
-  parseClaudePResult,
+  parseTranscriptAnswer,
+  projectDirectoryName,
 } from '../plugins/claude-plugin/scripts/claude-tui-adviser.mjs'
 
 describe('claude tui adviser prompt and args', () => {
   it('builds a plan prompt that keeps Claude advisory and read-only', () => {
     const prompt = buildClaudePrompt({
       mode: 'plan',
-      input: 'Add the claude-p handoff flow.',
+      input: 'Add the local Claude TUI handoff flow.',
       cwd: '/repo',
     })
 
     expect(prompt).toContain('advising Codex on a plan')
     expect(prompt).toContain('Codex remains responsible')
     expect(prompt).toContain('Do not edit files')
-    expect(prompt).toContain('Add the claude-p handoff flow.')
+    expect(prompt).toContain('Add the local Claude TUI handoff flow.')
   })
 
   it('builds a review prompt with review-specific output guidance', () => {
@@ -36,35 +43,41 @@ describe('claude tui adviser prompt and args', () => {
     expect(prompt).toContain('Review current changes.')
   })
 
-  it('builds claude-p args for JSON output and a read-only tool set', () => {
+  it('builds Claude TUI args for plan mode and a read-only tool set', () => {
     expect(
-      buildClaudePArgs({
+      buildClaudeArgs({
         prompt: 'prompt',
         sessionId: '123e4567-e89b-12d3-a456-426614174000',
-        timeoutMs: 1200,
+        settingsPath: '/tmp/settings.json',
       }),
     ).toEqual([
-      '--output-format',
-      'json',
-      '--timeout',
-      '2',
+      '--permission-mode',
+      'plan',
       '--tools',
       'Read,Glob,Grep,LS',
       '--session-id',
       '123e4567-e89b-12d3-a456-426614174000',
+      '--settings',
+      '/tmp/settings.json',
       'prompt',
     ])
   })
 
-  it('builds the hard npx claude-p invocation', () => {
-    const invocation = buildClaudePInvocation({
-      prompt: 'prompt',
+  it('builds a tmux invocation for the local Claude TUI runtime', () => {
+    const invocation = buildTmuxStartInvocation({
+      cwd: '/repo',
+      prompt: "plan O'Hara",
       sessionId: 'session-1',
-      timeoutMs: 1000,
+      sessionName: 'codex-claude-session',
+      settingsPath: '/tmp/settings.json',
     })
 
-    expect(invocation.command).toBe('npx')
-    expect(invocation.args.slice(0, 2)).toEqual(['-y', 'claude-p'])
+    expect(invocation.command).toBe('tmux')
+    expect(invocation.args.slice(0, 5)).toEqual(['new-session', '-d', '-s', 'codex-claude-session', '-c'])
+    expect(invocation.args).toContain('/repo')
+    expect(invocation.args.at(-1)).toContain("'claude'")
+    expect(invocation.args.at(-1)).toContain("'--permission-mode'")
+    expect(invocation.args.at(-1)).toContain("'plan O'\\''Hara'")
   })
 
   it('parses CLI mode and timeout', () => {
@@ -79,69 +92,95 @@ describe('claude tui adviser prompt and args', () => {
   })
 })
 
-describe('claude-p result parsing and failures', () => {
-  it('parses a successful claude-p JSON result', () => {
+describe('Claude transcript parsing and failures', () => {
+  it('parses the last assistant text block from a Claude project transcript', () => {
+    const raw = [
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'First' }] } }),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'continue' } }),
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'private' },
+            { type: 'text', text: 'Use the tmux runtime.' },
+          ],
+        },
+      }),
+    ].join('\n')
+
+    expect(parseTranscriptAnswer(raw)).toBe('Use the tmux runtime.')
+  })
+
+  it('finds a direct Claude project transcript path', async () => {
+    const claudeHome = await mkdtemp(join(tmpdir(), 'claude-home-'))
+    const cwd = '/repo/path'
+    const sessionId = 'session-1'
+    const projectDir = join(claudeHome, 'projects', projectDirectoryName(cwd))
+    const transcriptPath = join(projectDir, `${sessionId}.jsonl`)
+
+    await mkdir(projectDir, { recursive: true })
+    await writeFile(transcriptPath, '{}\n')
+
+    try {
+      await expect(findClaudeTranscriptPath({ cwd, sessionId, claudeHome })).resolves.toBe(transcriptPath)
+    } finally {
+      await rm(claudeHome, { force: true, recursive: true })
+    }
+  })
+
+  it('finds only deterministic direct transcript paths without fallback scanning', async () => {
+    const claudeHome = await mkdtemp(join(tmpdir(), 'claude-home-'))
+
+    try {
+      await expect(findDirectClaudeTranscriptPath({
+        cwd: '/repo/path',
+        sessionId: 'missing-session',
+        claudeHome,
+      })).resolves.toBeNull()
+    } finally {
+      await rm(claudeHome, { force: true, recursive: true })
+    }
+  })
+
+  it('parses transcript answers from the end instead of scanning only forward', () => {
+    const raw = [
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'older' }] } }),
+      '{bad json',
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'newer' }] } }),
+    ].join('\n')
+
+    expect(parseTranscriptAnswer(raw)).toBe('newer')
+  })
+
+  it('builds a local runtime handoff', () => {
     expect(
-      parseClaudePResult({
-        raw: JSON.stringify({
-          type: 'result',
-          subtype: 'success',
-          is_error: false,
-          session_id: 'session-from-claude-p',
-          result: 'Use claude-p.',
-        }),
-        mode: 'plan',
-        sessionId: 'fallback-session',
+      buildHandoff({
+        answer: 'Use tmux.',
         cwd: '/repo',
+        mode: 'plan',
+        sessionId: 'session-1',
       }),
     ).toMatchObject({
       ok: true,
-      source: 'claude-p',
+      source: 'claude-tui',
       mode: 'plan',
-      sessionId: 'session-from-claude-p',
+      sessionId: 'session-1',
       cwd: '/repo',
-      answer: 'Use claude-p.',
+      answer: 'Use tmux.',
     })
   })
 
-  it('rejects claude-p error results', () => {
-    expect(() =>
-      parseClaudePResult({
-        raw: JSON.stringify({ is_error: true, result: 'permission denied' }),
-        mode: 'review',
-        sessionId: 'session-1',
-      }),
-    ).toThrow('permission denied')
+  it('classifies missing tmux failures', () => {
+    expect(classifyLaunchFailure(new Error('spawn tmux ENOENT'))).toBe('Claude TUI adviser requires `tmux` on PATH.')
   })
 
-  it('rejects claude-p JSON without an answer', () => {
-    expect(() =>
-      parseClaudePResult({
-        raw: JSON.stringify({ is_error: false }),
-        mode: 'review',
-        sessionId: 'session-1',
-      }),
-    ).toThrow('claude-p did not include an answer')
-  })
-
-  it('rejects noncanonical answer fields', () => {
-    expect(() =>
-      parseClaudePResult({
-        raw: JSON.stringify({ is_error: false, final_text: 'legacy alias' }),
-        mode: 'review',
-        sessionId: 'session-1',
-      }),
-    ).toThrow('claude-p did not include an answer')
-  })
-
-  it('classifies missing claude-p failures', () => {
-    expect(classifyLaunchFailure(new Error('spawn npx ENOENT'))).toBe(
-      'Claude TUI adviser requires `npx` to run `claude-p`.',
-    )
+  it('classifies missing Claude CLI failures', () => {
+    expect(classifyLaunchFailure(new Error('spawn claude ENOENT'))).toBe('Claude TUI adviser requires `claude` on PATH.')
   })
 
   it('classifies timeout failures', () => {
-    expect(classifyLaunchFailure(new Error('npx claude-p exited with 124'))).toBe(
+    expect(classifyLaunchFailure(new Error('Claude TUI adviser timed out waiting for Stop.'))).toBe(
       'Claude TUI adviser timed out before producing a handoff.',
     )
   })

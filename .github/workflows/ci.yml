@@ -28,11 +28,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Validate plugin manifests
-        run: pnpm validate-plugins
-
-      - name: Test
-        run: pnpm test
+      - name: Check
+        run: pnpm check
 
   release:
     runs-on: ubuntu-latest

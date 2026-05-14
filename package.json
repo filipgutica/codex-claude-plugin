@@ -8,11 +8,13 @@
     "node": ">=20.16.0"
   },
   "scripts": {
+    "build:runtime": "node scripts/build-runtime.mjs",
+    "check:runtime": "node scripts/build-runtime.mjs --check",
     "postinstall": "lefthook install",
     "stamp-version": "node scripts/stamp-version.mjs",
     "validate-plugins": "node scripts/validate-plugins.mjs",
     "test": "vitest run",
-    "check": "pnpm validate-plugins && pnpm test"
+    "check": "pnpm check:runtime && pnpm validate-plugins && pnpm test"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.8.0",
