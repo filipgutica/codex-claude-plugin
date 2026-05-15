@@ -11,11 +11,10 @@ import {
   buildTmuxPromptSubmissionInvocations,
   buildTmuxStartInvocation,
   classifyLaunchFailure,
-  findDirectClaudeTranscriptPath,
-  findClaudeTranscriptPath,
   parseArgs,
   parseTranscriptAnswer,
   projectDirectoryName,
+  resolveClaudeTranscriptPath,
 } from '../plugins/claude-plugin/scripts/claude-tui-adviser.mjs'
 
 describe('claude tui adviser prompt and args', () => {
@@ -73,9 +72,9 @@ describe('claude tui adviser prompt and args', () => {
     expect(invocation.command).toBe('tmux')
     expect(invocation.args.slice(0, 5)).toEqual(['new-session', '-d', '-s', 'codex-claude-session', '-c'])
     expect(invocation.args).toContain('/repo')
-    expect(invocation.args.at(-1)).toContain("'claude'")
-    expect(invocation.args.at(-1)).toContain("'--permission-mode'")
-    expect(invocation.args.at(-1)).not.toContain("plan O'\\''Hara")
+    expect(invocation.args.at(-1)).toBe(
+      "'claude' '--permission-mode' 'plan' '--tools' 'Read,Glob,Grep,LS' '--session-id' 'session-1' '--settings' '/tmp/settings.json'",
+    )
   })
 
   it('builds tmux invocations that paste and submit the prompt after TUI startup', () => {
@@ -137,7 +136,27 @@ describe('Claude transcript parsing and failures', () => {
     expect(parseTranscriptAnswer(raw)).toBe('Use the tmux runtime.')
   })
 
-  it('finds a direct Claude project transcript path', async () => {
+  it('resolves a Stop hook transcript path before deterministic fallbacks', async () => {
+    const claudeHome = await mkdtemp(join(tmpdir(), 'claude-home-'))
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'claude-runtime-'))
+    const transcriptPath = join(runtimeDir, 'stop-transcript.jsonl')
+
+    await writeFile(transcriptPath, '{}\n')
+
+    try {
+      await expect(resolveClaudeTranscriptPath({
+        cwd: '/repo/path',
+        sessionId: 'session-1',
+        stopEvent: { event: 'Stop', transcriptPath },
+        claudeHome,
+      })).resolves.toBe(transcriptPath)
+    } finally {
+      await rm(claudeHome, { force: true, recursive: true })
+      await rm(runtimeDir, { force: true, recursive: true })
+    }
+  })
+
+  it('falls back to a deterministic Claude project transcript path', async () => {
     const claudeHome = await mkdtemp(join(tmpdir(), 'claude-home-'))
     const cwd = '/repo/path'
     const sessionId = 'session-1'
@@ -148,19 +167,28 @@ describe('Claude transcript parsing and failures', () => {
     await writeFile(transcriptPath, '{}\n')
 
     try {
-      await expect(findClaudeTranscriptPath({ cwd, sessionId, claudeHome })).resolves.toBe(transcriptPath)
+      await expect(resolveClaudeTranscriptPath({
+        cwd,
+        sessionId,
+        stopEvent: { event: 'Stop' },
+        claudeHome,
+      })).resolves.toBe(transcriptPath)
     } finally {
       await rm(claudeHome, { force: true, recursive: true })
     }
   })
 
-  it('finds only deterministic direct transcript paths without fallback scanning', async () => {
+  it('does not recursively scan for transcript paths outside deterministic locations', async () => {
     const claudeHome = await mkdtemp(join(tmpdir(), 'claude-home-'))
+    const scannedFallbackDir = join(claudeHome, 'projects', 'other-project')
+    await mkdir(scannedFallbackDir, { recursive: true })
+    await writeFile(join(scannedFallbackDir, 'missing-session.jsonl'), '{}\n')
 
     try {
-      await expect(findDirectClaudeTranscriptPath({
+      await expect(resolveClaudeTranscriptPath({
         cwd: '/repo/path',
         sessionId: 'missing-session',
+        stopEvent: { event: 'Stop' },
         claudeHome,
       })).resolves.toBeNull()
     } finally {
