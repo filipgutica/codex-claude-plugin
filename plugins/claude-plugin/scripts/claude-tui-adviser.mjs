@@ -7,6 +7,7 @@ import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 const READ_ONLY_TOOLS = 'Read,Glob,Grep,LS';
+const REVIEW_MODEL = 'sonnet';
 const DEFAULT_TIMEOUT_MS = 300000;
 const HOOK_POLL_MS = 250;
 const PANE_STREAM_POLL_MS = 1000;
@@ -97,9 +98,8 @@ const parseTimeoutMs = (rawValue) => {
     return value;
 };
 // Command execution and tmux command builders
-export const buildClaudeArgs = ({ sessionId, settingsPath }) => [
-    '--permission-mode',
-    'plan',
+export const buildClaudeArgs = ({ mode, sessionId, settingsPath }) => [
+    ...(mode === 'plan' ? ['--permission-mode', 'plan'] : ['--model', REVIEW_MODEL]),
     '--tools',
     READ_ONLY_TOOLS,
     '--session-id',
@@ -109,7 +109,7 @@ export const buildClaudeArgs = ({ sessionId, settingsPath }) => [
 ];
 const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 const shellJoin = (values) => values.map(shellQuote).join(' ');
-export const buildTmuxStartInvocation = ({ cwd, sessionId, sessionName, settingsPath }) => ({
+export const buildTmuxStartInvocation = ({ cwd, mode, sessionId, sessionName, settingsPath }) => ({
     command: 'tmux',
     args: [
         'new-session',
@@ -118,7 +118,7 @@ export const buildTmuxStartInvocation = ({ cwd, sessionId, sessionName, settings
         sessionName,
         '-c',
         cwd,
-        shellJoin(['claude', ...buildClaudeArgs({ sessionId, settingsPath })]),
+        shellJoin(['claude', ...buildClaudeArgs({ mode, sessionId, settingsPath })]),
     ],
 });
 export const buildTmuxPromptSubmissionInvocations = ({ bufferName, prompt, sessionName }) => [
@@ -432,6 +432,7 @@ const cleanupRuntimeFiles = async (runtimeDir) => {
 const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, sessionId, sessionName }) => {
     const { command, args } = buildTmuxStartInvocation({
         cwd,
+        mode,
         sessionId,
         sessionName,
         settingsPath: runtimeFiles.settingsPath,

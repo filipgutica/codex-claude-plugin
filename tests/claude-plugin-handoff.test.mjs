@@ -47,6 +47,7 @@ describe('claude tui adviser prompt and args', () => {
   it('builds Claude TUI args for plan mode and a read-only tool set', () => {
     expect(
       buildClaudeArgs({
+        mode: 'plan',
         sessionId: '123e4567-e89b-12d3-a456-426614174000',
         settingsPath: '/tmp/settings.json',
       }),
@@ -62,9 +63,29 @@ describe('claude tui adviser prompt and args', () => {
     ])
   })
 
-  it('builds a tmux invocation for the local Claude TUI runtime', () => {
+  it('builds Claude TUI args for review mode with Sonnet and a read-only tool set', () => {
+    expect(
+      buildClaudeArgs({
+        mode: 'review',
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        settingsPath: '/tmp/settings.json',
+      }),
+    ).toEqual([
+      '--model',
+      'sonnet',
+      '--tools',
+      'Read,Glob,Grep,LS',
+      '--session-id',
+      '123e4567-e89b-12d3-a456-426614174000',
+      '--settings',
+      '/tmp/settings.json',
+    ])
+  })
+
+  it('builds a tmux invocation for the local Claude TUI plan runtime', () => {
     const invocation = buildTmuxStartInvocation({
       cwd: '/repo',
+      mode: 'plan',
       sessionId: 'session-1',
       sessionName: 'codex-claude-session',
       settingsPath: '/tmp/settings.json',
@@ -75,6 +96,20 @@ describe('claude tui adviser prompt and args', () => {
     expect(invocation.args).toContain('/repo')
     expect(invocation.args.at(-1)).toBe(
       "'claude' '--permission-mode' 'plan' '--tools' 'Read,Glob,Grep,LS' '--session-id' 'session-1' '--settings' '/tmp/settings.json'",
+    )
+  })
+
+  it('builds a tmux invocation for the local Claude TUI review runtime', () => {
+    const invocation = buildTmuxStartInvocation({
+      cwd: '/repo',
+      mode: 'review',
+      sessionId: 'session-1',
+      sessionName: 'codex-claude-session',
+      settingsPath: '/tmp/settings.json',
+    })
+
+    expect(invocation.args.at(-1)).toBe(
+      "'claude' '--model' 'sonnet' '--tools' 'Read,Glob,Grep,LS' '--session-id' 'session-1' '--settings' '/tmp/settings.json'",
     )
   })
 

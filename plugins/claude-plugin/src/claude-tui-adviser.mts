@@ -29,6 +29,7 @@ type HookEvent = {
 }
 
 const READ_ONLY_TOOLS = 'Read,Glob,Grep,LS'
+const REVIEW_MODEL = 'sonnet'
 const DEFAULT_TIMEOUT_MS = 300000
 const HOOK_POLL_MS = 250
 const PANE_STREAM_POLL_MS = 1000
@@ -141,12 +142,12 @@ const parseTimeoutMs = (rawValue: string) => {
 
 // Command execution and tmux command builders
 
-export const buildClaudeArgs = ({ sessionId, settingsPath }: {
+export const buildClaudeArgs = ({ mode, sessionId, settingsPath }: {
+  mode: Mode
   sessionId: string
   settingsPath: string
 }) => [
-  '--permission-mode',
-  'plan',
+  ...(mode === 'plan' ? ['--permission-mode', 'plan'] : ['--model', REVIEW_MODEL]),
   '--tools',
   READ_ONLY_TOOLS,
   '--session-id',
@@ -159,8 +160,9 @@ const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
 
 const shellJoin = (values: string[]) => values.map(shellQuote).join(' ')
 
-export const buildTmuxStartInvocation = ({ cwd, sessionId, sessionName, settingsPath }: {
+export const buildTmuxStartInvocation = ({ cwd, mode, sessionId, sessionName, settingsPath }: {
   cwd: string
+  mode: Mode
   sessionId: string
   sessionName: string
   settingsPath: string
@@ -173,7 +175,7 @@ export const buildTmuxStartInvocation = ({ cwd, sessionId, sessionName, settings
     sessionName,
     '-c',
     cwd,
-    shellJoin(['claude', ...buildClaudeArgs({ sessionId, settingsPath })]),
+    shellJoin(['claude', ...buildClaudeArgs({ mode, sessionId, settingsPath })]),
   ],
 })
 
@@ -586,6 +588,7 @@ const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, 
 }) => {
   const { command, args } = buildTmuxStartInvocation({
     cwd,
+    mode,
     sessionId,
     sessionName,
     settingsPath: runtimeFiles.settingsPath,
