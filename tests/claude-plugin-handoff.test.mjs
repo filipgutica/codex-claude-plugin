@@ -248,10 +248,16 @@ describe('Claude transcript parsing and failures', () => {
 
   it('classifies missing tmux failures', () => {
     expect(classifyLaunchFailure(new Error('spawn tmux ENOENT'))).toBe('Claude TUI adviser requires `tmux` on PATH.')
+    expect(classifyLaunchFailure(new Error('Claude TUI adviser requires `tmux` on PATH.'))).toBe(
+      'Claude TUI adviser requires `tmux` on PATH.',
+    )
   })
 
   it('classifies missing Claude CLI failures', () => {
     expect(classifyLaunchFailure(new Error('spawn claude ENOENT'))).toBe('Claude TUI adviser requires `claude` on PATH.')
+    expect(classifyLaunchFailure(new Error('Claude TUI adviser requires Claude Code CLI `claude` on PATH.'))).toBe(
+      'Claude TUI adviser requires `claude` on PATH.',
+    )
   })
 
   it('classifies Claude authentication failures from captured panes', () => {

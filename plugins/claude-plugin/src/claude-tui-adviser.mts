@@ -628,8 +628,8 @@ const appendTmuxPaneToError = async ({ error, sessionName }: {
 export const classifyLaunchFailure = (error: unknown) => {
   const message = error instanceof Error ? error.message : String(error)
   const knownFailure = ([
-    [/requires tmux on PATH|spawn tmux ENOENT/, 'Claude TUI adviser requires `tmux` on PATH.'],
-    [/requires Claude Code CLI on PATH|spawn claude ENOENT/, 'Claude TUI adviser requires `claude` on PATH.'],
+    [/requires `?tmux`? on PATH|spawn tmux ENOENT/, 'Claude TUI adviser requires `tmux` on PATH.'],
+    [/requires Claude Code CLI(?: `?claude`?)? on PATH|spawn claude ENOENT/, 'Claude TUI adviser requires `claude` on PATH.'],
     [/Please run \/login|Invalid authentication credentials/, 'Claude TUI adviser requires Claude authentication. Run `claude /login`.'],
     [/timed out waiting for Stop|timed out after/, 'Claude TUI adviser timed out before producing a handoff.'],
     [/could not find a final assistant answer/, 'Claude TUI adviser could not find a final assistant answer in the Claude transcript.'],
