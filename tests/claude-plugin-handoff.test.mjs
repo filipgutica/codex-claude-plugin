@@ -8,6 +8,7 @@ import {
   buildClaudeArgs,
   buildClaudePrompt,
   buildHandoff,
+  buildTmuxPromptSubmissionInvocations,
   buildTmuxStartInvocation,
   classifyLaunchFailure,
   findDirectClaudeTranscriptPath,
@@ -46,7 +47,6 @@ describe('claude tui adviser prompt and args', () => {
   it('builds Claude TUI args for plan mode and a read-only tool set', () => {
     expect(
       buildClaudeArgs({
-        prompt: 'prompt',
         sessionId: '123e4567-e89b-12d3-a456-426614174000',
         settingsPath: '/tmp/settings.json',
       }),
@@ -59,14 +59,12 @@ describe('claude tui adviser prompt and args', () => {
       '123e4567-e89b-12d3-a456-426614174000',
       '--settings',
       '/tmp/settings.json',
-      'prompt',
     ])
   })
 
   it('builds a tmux invocation for the local Claude TUI runtime', () => {
     const invocation = buildTmuxStartInvocation({
       cwd: '/repo',
-      prompt: "plan O'Hara",
       sessionId: 'session-1',
       sessionName: 'codex-claude-session',
       settingsPath: '/tmp/settings.json',
@@ -77,7 +75,34 @@ describe('claude tui adviser prompt and args', () => {
     expect(invocation.args).toContain('/repo')
     expect(invocation.args.at(-1)).toContain("'claude'")
     expect(invocation.args.at(-1)).toContain("'--permission-mode'")
-    expect(invocation.args.at(-1)).toContain("'plan O'\\''Hara'")
+    expect(invocation.args.at(-1)).not.toContain("plan O'\\''Hara")
+  })
+
+  it('builds tmux invocations that paste and submit the prompt after TUI startup', () => {
+    expect(
+      buildTmuxPromptSubmissionInvocations({
+        bufferName: 'codex-claude-session-prompt',
+        prompt: "plan O'Hara\nwith newline",
+        sessionName: 'codex-claude-session',
+      }),
+    ).toEqual([
+      {
+        command: 'tmux',
+        args: ['set-buffer', '-b', 'codex-claude-session-prompt', "plan O'Hara\nwith newline"],
+      },
+      {
+        command: 'tmux',
+        args: ['paste-buffer', '-b', 'codex-claude-session-prompt', '-t', 'codex-claude-session'],
+      },
+      {
+        command: 'tmux',
+        args: ['delete-buffer', '-b', 'codex-claude-session-prompt'],
+      },
+      {
+        command: 'tmux',
+        args: ['send-keys', '-t', 'codex-claude-session', 'Enter'],
+      },
+    ])
   })
 
   it('parses CLI mode and timeout', () => {

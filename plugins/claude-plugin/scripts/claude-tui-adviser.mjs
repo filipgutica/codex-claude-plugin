@@ -84,7 +84,7 @@ const parseTimeoutMs = (rawValue) => {
         throw new Error('--timeout-ms must be a positive number.');
     return value;
 };
-export const buildClaudeArgs = ({ prompt, sessionId, settingsPath }) => [
+export const buildClaudeArgs = ({ sessionId, settingsPath }) => [
     '--permission-mode',
     'plan',
     '--tools',
@@ -93,11 +93,10 @@ export const buildClaudeArgs = ({ prompt, sessionId, settingsPath }) => [
     sessionId,
     '--settings',
     settingsPath,
-    prompt,
 ];
 const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 const shellJoin = (values) => values.map(shellQuote).join(' ');
-export const buildTmuxStartInvocation = ({ cwd, prompt, sessionId, sessionName, settingsPath }) => ({
+export const buildTmuxStartInvocation = ({ cwd, sessionId, sessionName, settingsPath }) => ({
     command: 'tmux',
     args: [
         'new-session',
@@ -106,9 +105,27 @@ export const buildTmuxStartInvocation = ({ cwd, prompt, sessionId, sessionName, 
         sessionName,
         '-c',
         cwd,
-        shellJoin(['claude', ...buildClaudeArgs({ prompt, sessionId, settingsPath })]),
+        shellJoin(['claude', ...buildClaudeArgs({ sessionId, settingsPath })]),
     ],
 });
+export const buildTmuxPromptSubmissionInvocations = ({ bufferName, prompt, sessionName }) => [
+    {
+        command: 'tmux',
+        args: ['set-buffer', '-b', bufferName, prompt],
+    },
+    {
+        command: 'tmux',
+        args: ['paste-buffer', '-b', bufferName, '-t', sessionName],
+    },
+    {
+        command: 'tmux',
+        args: ['delete-buffer', '-b', bufferName],
+    },
+    {
+        command: 'tmux',
+        args: ['send-keys', '-t', sessionName, 'Enter'],
+    },
+];
 const execCommand = async ({ command, args, cwd, input, timeoutMs = 30000 }) => new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(command, args, {
         cwd,
@@ -144,9 +161,9 @@ const execCommand = async ({ command, args, cwd, input, timeoutMs = 30000 }) => 
         child.stdin.end(input);
     }
 });
-const assertRuntimeBinary = async ({ command, args, label }) => {
+const assertRuntimeBinary = async ({ command, args, label, timeoutMs }) => {
     try {
-        await execCommand({ command, args });
+        await execCommand({ command, args, timeoutMs });
     }
     catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -429,8 +446,18 @@ export const classifyLaunchFailure = (error) => {
 };
 export const runAdviser = async ({ mode, input, timeoutMs, cwd = process.cwd() }) => {
     const deadlineMs = Date.now() + timeoutMs;
-    await assertRuntimeBinary({ command: 'tmux', args: ['-V'], label: '`tmux`' });
-    await assertRuntimeBinary({ command: 'claude', args: ['--version'], label: 'Claude Code CLI `claude`' });
+    await assertRuntimeBinary({
+        command: 'tmux',
+        args: ['-V'],
+        label: '`tmux`',
+        timeoutMs: remainingTimeoutMs(deadlineMs),
+    });
+    await assertRuntimeBinary({
+        command: 'claude',
+        args: ['--version'],
+        label: 'Claude Code CLI `claude`',
+        timeoutMs: remainingTimeoutMs(deadlineMs),
+    });
     const sessionId = randomUUID();
     const sessionName = `codex-claude-${sessionId.slice(0, 8)}`;
     const prompt = buildClaudePrompt({ mode, input, cwd });
@@ -449,16 +476,22 @@ export const runAdviser = async ({ mode, input, timeoutMs, cwd = process.cwd() }
 const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, sessionId, sessionName }) => {
     const { command, args } = buildTmuxStartInvocation({
         cwd,
-        prompt,
         sessionId,
         sessionName,
         settingsPath: runtimeFiles.settingsPath,
     });
     await execCommand({ command, args, cwd, timeoutMs: remainingTimeoutMs(deadlineMs) });
     await waitForHookEvent({ deadlineMs, event: 'SessionStart', eventLogPath: runtimeFiles.eventLogPath });
+    await submitPromptToClaudeTui({ deadlineMs, prompt, sessionName });
     const stopEvent = await waitForHookEvent({ deadlineMs, event: 'Stop', eventLogPath: runtimeFiles.eventLogPath });
     const answer = await waitForTranscriptAnswer({ cwd, deadlineMs, sessionId, stopEvent });
     return buildHandoff({ answer, cwd, mode, sessionId });
+};
+const submitPromptToClaudeTui = async ({ deadlineMs, prompt, sessionName }) => {
+    const bufferName = `${sessionName}-prompt`;
+    for (const { command, args } of buildTmuxPromptSubmissionInvocations({ bufferName, prompt, sessionName })) {
+        await execCommand({ command, args, timeoutMs: remainingTimeoutMs(deadlineMs) });
+    }
 };
 const appendTmuxPaneToError = async ({ error, sessionName }) => {
     const capturedPane = await captureTmuxPane(sessionName);
