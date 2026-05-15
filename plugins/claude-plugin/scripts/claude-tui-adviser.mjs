@@ -9,6 +9,8 @@ import { join } from 'node:path';
 const READ_ONLY_TOOLS = 'Read,Glob,Grep,LS';
 const DEFAULT_TIMEOUT_MS = 300000;
 const HOOK_POLL_MS = 250;
+const PANE_STREAM_POLL_MS = 1000;
+const STREAM_PANE_ENV = 'CODEX_CLAUDE_STREAM_PANE';
 // CLI parsing and prompt construction
 const readStdin = async () => {
     const chunks = [];
@@ -27,6 +29,7 @@ const waitUntil = async ({ deadlineMs, getValue, timeoutMessage }) => {
     }
     throw new Error(timeoutMessage);
 };
+export const isPaneStreamingEnabled = () => process.env[STREAM_PANE_ENV] === '1';
 const remainingTimeoutMs = (deadlineMs) => {
     const remaining = deadlineMs - Date.now();
     if (remaining <= 0)
@@ -389,6 +392,25 @@ const captureTmuxPane = async (sessionName) => {
         return null;
     }
 };
+const createPaneStreamer = ({ sessionName }) => {
+    if (!isPaneStreamingEnabled())
+        return { stop: () => undefined };
+    let lastPane = '';
+    const streamPane = async () => {
+        const pane = await captureTmuxPane(sessionName);
+        if (pane === null || pane === lastPane)
+            return;
+        lastPane = pane;
+        process.stderr.write(`\n[${sessionName} pane]\n${pane}\n`);
+    };
+    const interval = setInterval(() => {
+        void streamPane();
+    }, PANE_STREAM_POLL_MS);
+    void streamPane();
+    return {
+        stop: () => clearInterval(interval),
+    };
+};
 const killTmuxSession = async (sessionName) => {
     try {
         await execCommand({ command: 'tmux', args: ['kill-session', '-t', sessionName] });
@@ -415,11 +437,17 @@ const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, 
         settingsPath: runtimeFiles.settingsPath,
     });
     await execCommand({ command, args, cwd, timeoutMs: remainingTimeoutMs(deadlineMs) });
-    await waitForHookEvent({ deadlineMs, event: 'SessionStart', eventLogPath: runtimeFiles.eventLogPath });
-    await submitPromptToClaudeTui({ deadlineMs, prompt, sessionName });
-    const stopEvent = await waitForHookEvent({ deadlineMs, event: 'Stop', eventLogPath: runtimeFiles.eventLogPath });
-    const answer = await waitForTranscriptAnswer({ cwd, deadlineMs, sessionId, stopEvent });
-    return buildHandoff({ answer, cwd, mode, sessionId });
+    const paneStreamer = createPaneStreamer({ sessionName });
+    try {
+        await waitForHookEvent({ deadlineMs, event: 'SessionStart', eventLogPath: runtimeFiles.eventLogPath });
+        await submitPromptToClaudeTui({ deadlineMs, prompt, sessionName });
+        const stopEvent = await waitForHookEvent({ deadlineMs, event: 'Stop', eventLogPath: runtimeFiles.eventLogPath });
+        const answer = await waitForTranscriptAnswer({ cwd, deadlineMs, sessionId, stopEvent });
+        return buildHandoff({ answer, cwd, mode, sessionId });
+    }
+    finally {
+        paneStreamer.stop();
+    }
 };
 const submitPromptToClaudeTui = async ({ deadlineMs, prompt, sessionName }) => {
     const bufferName = `${sessionName}-prompt`;
@@ -438,6 +466,7 @@ export const classifyLaunchFailure = (error) => {
     const knownFailure = [
         [/requires tmux on PATH|spawn tmux ENOENT/, 'Claude TUI adviser requires `tmux` on PATH.'],
         [/requires Claude Code CLI on PATH|spawn claude ENOENT/, 'Claude TUI adviser requires `claude` on PATH.'],
+        [/Please run \/login|Invalid authentication credentials/, 'Claude TUI adviser requires Claude authentication. Run `claude /login`.'],
         [/timed out waiting for Stop|timed out after/, 'Claude TUI adviser timed out before producing a handoff.'],
         [/could not find a final assistant answer/, 'Claude TUI adviser could not find a final assistant answer in the Claude transcript.'],
     ].find(([pattern]) => pattern.test(message));

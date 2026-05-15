@@ -11,6 +11,7 @@ import {
   buildTmuxPromptSubmissionInvocations,
   buildTmuxStartInvocation,
   classifyLaunchFailure,
+  isPaneStreamingEnabled,
   parseArgs,
   parseTranscriptAnswer,
   projectDirectoryName,
@@ -113,6 +114,27 @@ describe('claude tui adviser prompt and args', () => {
 
   it('rejects --timeout-ms without a value', () => {
     expect(() => parseArgs(['review', '--timeout-ms'])).toThrow('--timeout-ms requires a value')
+  })
+
+  it('enables pane streaming only when explicitly requested', () => {
+    const originalValue = process.env.CODEX_CLAUDE_STREAM_PANE
+
+    try {
+      delete process.env.CODEX_CLAUDE_STREAM_PANE
+      expect(isPaneStreamingEnabled()).toBe(false)
+
+      process.env.CODEX_CLAUDE_STREAM_PANE = '1'
+      expect(isPaneStreamingEnabled()).toBe(true)
+
+      process.env.CODEX_CLAUDE_STREAM_PANE = 'true'
+      expect(isPaneStreamingEnabled()).toBe(false)
+    } finally {
+      if (originalValue === undefined) {
+        delete process.env.CODEX_CLAUDE_STREAM_PANE
+      } else {
+        process.env.CODEX_CLAUDE_STREAM_PANE = originalValue
+      }
+    }
   })
 })
 
@@ -230,6 +252,12 @@ describe('Claude transcript parsing and failures', () => {
 
   it('classifies missing Claude CLI failures', () => {
     expect(classifyLaunchFailure(new Error('spawn claude ENOENT'))).toBe('Claude TUI adviser requires `claude` on PATH.')
+  })
+
+  it('classifies Claude authentication failures from captured panes', () => {
+    expect(classifyLaunchFailure(new Error('Last tmux pane:\nPlease run /login · API Error: 401 Invalid authentication credentials'))).toBe(
+      'Claude TUI adviser requires Claude authentication. Run `claude /login`.',
+    )
   })
 
   it('classifies timeout failures', () => {
