@@ -2,9 +2,11 @@
 // fallow-ignore-file code-duplication
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+// Constants and types
 
 type Mode = 'plan' | 'review'
 
@@ -23,14 +25,17 @@ type CommandResult = {
 type HookEvent = {
   event: unknown
   at?: unknown
-  transcriptPath?: string
-  lastAssistantMessage?: string
+  transcriptPath?: unknown
 }
 
 const READ_ONLY_TOOLS = 'Read,Glob,Grep,LS'
+const REVIEW_MODEL = 'sonnet'
 const DEFAULT_TIMEOUT_MS = 300000
 const HOOK_POLL_MS = 250
-const FALLBACK_TRANSCRIPT_SCAN_MS = 1000
+const PANE_STREAM_POLL_MS = 1000
+const STREAM_PANE_ENV = 'CODEX_CLAUDE_STREAM_PANE'
+
+// CLI parsing and prompt construction
 
 const readStdin = async () => {
   const chunks: Buffer[] = []
@@ -42,6 +47,22 @@ const firstString = (...values: unknown[]) =>
   values.find((value): value is string => typeof value === 'string' && value.trim() !== '') || null
 
 const sleep = (ms: number) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms))
+
+const waitUntil = async <T,>({ deadlineMs, getValue, timeoutMessage }: {
+  deadlineMs: number
+  getValue: () => Promise<T | null>
+  timeoutMessage: string
+}) => {
+  while (Date.now() < deadlineMs) {
+    const value = await getValue()
+    if (value !== null) return value
+    await sleep(Math.min(HOOK_POLL_MS, Math.max(1, deadlineMs - Date.now())))
+  }
+
+  throw new Error(timeoutMessage)
+}
+
+export const isPaneStreamingEnabled = () => process.env[STREAM_PANE_ENV] === '1'
 
 const remainingTimeoutMs = (deadlineMs: number) => {
   const remaining = deadlineMs - Date.now()
@@ -119,29 +140,29 @@ const parseTimeoutMs = (rawValue: string) => {
   return value
 }
 
-export const buildClaudeArgs = ({ prompt, sessionId, settingsPath }: {
-  prompt: string
+// Command execution and tmux command builders
+
+export const buildClaudeArgs = ({ mode, sessionId, settingsPath }: {
+  mode: Mode
   sessionId: string
   settingsPath: string
 }) => [
-  '--permission-mode',
-  'plan',
+  ...(mode === 'plan' ? ['--permission-mode', 'plan'] : ['--model', REVIEW_MODEL]),
   '--tools',
   READ_ONLY_TOOLS,
   '--session-id',
   sessionId,
   '--settings',
   settingsPath,
-  prompt,
 ]
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
 
 const shellJoin = (values: string[]) => values.map(shellQuote).join(' ')
 
-export const buildTmuxStartInvocation = ({ cwd, prompt, sessionId, sessionName, settingsPath }: {
+export const buildTmuxStartInvocation = ({ cwd, mode, sessionId, sessionName, settingsPath }: {
   cwd: string
-  prompt: string
+  mode: Mode
   sessionId: string
   sessionName: string
   settingsPath: string
@@ -154,9 +175,33 @@ export const buildTmuxStartInvocation = ({ cwd, prompt, sessionId, sessionName, 
     sessionName,
     '-c',
     cwd,
-    shellJoin(['claude', ...buildClaudeArgs({ prompt, sessionId, settingsPath })]),
+    shellJoin(['claude', ...buildClaudeArgs({ mode, sessionId, settingsPath })]),
   ],
 })
+
+export const buildTmuxPromptSubmissionInvocations = ({ bufferName, prompt, sessionName }: {
+  bufferName: string
+  prompt: string
+  sessionName: string
+}) => [
+  {
+    command: 'tmux',
+    args: ['set-buffer', '-b', bufferName, prompt],
+  },
+  {
+    command: 'tmux',
+    // Preserve multi-line prompts as one bracketed paste before sending Enter.
+    args: ['paste-buffer', '-p', '-b', bufferName, '-t', sessionName],
+  },
+  {
+    command: 'tmux',
+    args: ['delete-buffer', '-b', bufferName],
+  },
+  {
+    command: 'tmux',
+    args: ['send-keys', '-t', sessionName, 'Enter'],
+  },
+]
 
 const execCommand = async ({ command, args, cwd, input, timeoutMs = 30000 }: {
   command: string
@@ -202,13 +247,14 @@ const execCommand = async ({ command, args, cwd, input, timeoutMs = 30000 }: {
   }
 })
 
-const assertRuntimeBinary = async ({ command, args, label }: {
+const assertRuntimeBinary = async ({ command, args, label, timeoutMs }: {
   command: string
   args: string[]
   label: string
+  timeoutMs?: number
 }) => {
   try {
-    await execCommand({ command, args })
+    await execCommand({ command, args, timeoutMs })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (/ENOENT/.test(message)) {
@@ -218,6 +264,8 @@ const assertRuntimeBinary = async ({ command, args, label }: {
     throw new Error(`Claude TUI adviser could not run ${label}: ${message}`)
   }
 }
+
+// Runtime hook/settings file creation
 
 const createRuntimeFiles = async (): Promise<RuntimeFiles> => {
   const runtimeDir = await mkdtemp(join(tmpdir(), 'codex-claude-tui-'))
@@ -230,6 +278,9 @@ const createRuntimeFiles = async (): Promise<RuntimeFiles> => {
     '',
     "const event = process.argv[2] || 'unknown'",
     "const chunks = []",
+    "const parsePayload = (raw) => {",
+    "  try { return JSON.parse(raw) } catch { return {} }",
+    '}',
     "process.stdin.on('data', (chunk) => chunks.push(Buffer.from(chunk)))",
     "process.stdin.on('end', () => {",
     "  const stdin = Buffer.concat(chunks).toString('utf8')",
@@ -238,14 +289,10 @@ const createRuntimeFiles = async (): Promise<RuntimeFiles> => {
     "    event,",
     "    at: new Date().toISOString(),",
     "    transcriptPath: payload.transcript_path,",
-    "    lastAssistantMessage: payload.last_assistant_message,",
     "  }",
     "  if (process.env.CODEX_CLAUDE_DEBUG_HOOK_STDIN === '1') record.stdin = stdin",
     "  appendFileSync(process.env.CODEX_CLAUDE_EVENT_LOG, `${JSON.stringify(record)}\\n`)",
     '})',
-    "const parsePayload = (raw) => {",
-    "  try { return JSON.parse(raw) } catch { return {} }",
-    '}',
     'process.stdin.resume()',
     '',
   ].join('\n'))
@@ -262,6 +309,8 @@ const createRuntimeFiles = async (): Promise<RuntimeFiles> => {
 
   return { eventLogPath, hookPath, settingsPath, runtimeDir }
 }
+
+// Hook waiting and transcript reading
 
 const readHookEvents = async (eventLogPath: string) => {
   try {
@@ -283,16 +332,14 @@ const waitForHookEvent = async ({ deadlineMs, event, eventLogPath }: {
   deadlineMs: number
   event: 'SessionStart' | 'Stop'
   eventLogPath: string
-}) => {
-  while (Date.now() < deadlineMs) {
+}) => waitUntil({
+  deadlineMs,
+  timeoutMessage: `Claude TUI adviser timed out waiting for ${event}.`,
+  getValue: async () => {
     const events = await readHookEvents(eventLogPath)
-    const matchedEvent = events.find((entry) => entry.event === event)
-    if (matchedEvent !== undefined) return matchedEvent
-    await sleep(Math.min(HOOK_POLL_MS, Math.max(1, deadlineMs - Date.now())))
-  }
-
-  throw new Error(`Claude TUI adviser timed out waiting for ${event}.`)
-}
+    return events.find((entry) => entry.event === event) || null
+  },
+})
 
 const isNodeError = (error: unknown): error is NodeJS.ErrnoException =>
   error instanceof Error && 'code' in error
@@ -309,90 +356,31 @@ const fileExists = async (path: string) => {
   }
 }
 
-const collectJsonlFiles = async ({ root, maxFiles = 5000 }: {
-  root: string
-  maxFiles?: number
-}) => {
-  const files: string[] = []
-  const pendingDirs = [root]
-
-  while (pendingDirs.length > 0 && files.length < maxFiles) {
-    const dir = pendingDirs.pop()
-    if (dir !== undefined) {
-      addJsonlPaths({
-        dir,
-        entries: await readDirectoryEntries(dir),
-        files,
-        maxFiles,
-        pendingDirs,
-      })
-    }
-  }
-
-  return files
-}
-
-const addJsonlPaths = ({ dir, entries, files, maxFiles, pendingDirs }: {
-  dir: string
-  entries: Awaited<ReturnType<typeof readDirectoryEntries>>
-  files: string[]
-  maxFiles: number
-  pendingDirs: string[]
-}) => {
-  for (const entry of entries) {
-    if (files.length >= maxFiles) return
-    addJsonlPath({ dir, entry, files, pendingDirs })
-  }
-}
-
-const addJsonlPath = ({ dir, entry, files, pendingDirs }: {
-  dir: string
-  entry: Awaited<ReturnType<typeof readDirectoryEntries>>[number]
-  files: string[]
-  pendingDirs: string[]
-}) => {
-  const path = join(dir, entry.name)
-  if (entry.isDirectory()) {
-    pendingDirs.push(path)
-    return
-  }
-
-  if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(path)
-}
-
-const readDirectoryEntries = async (dir: string) => {
-  try {
-    return await readdir(dir, { withFileTypes: true })
-  } catch (error) {
-    if (isNodeError(error) && error.code === 'ENOENT') return []
-    throw error
-  }
-}
-
-export const findDirectClaudeTranscriptPath = async ({ cwd, sessionId, claudeHome = join(homedir(), '.claude') }: {
+const deterministicTranscriptPaths = ({ cwd, sessionId, claudeHome }: {
   cwd: string
   sessionId: string
-  claudeHome?: string
-}) => {
-  const directProjectPath = join(claudeHome, 'projects', projectDirectoryName(cwd), `${sessionId}.jsonl`)
-  if (await fileExists(directProjectPath)) return directProjectPath
+  claudeHome: string
+}) => [
+  join(claudeHome, 'projects', projectDirectoryName(cwd), `${sessionId}.jsonl`),
+  join(claudeHome, 'transcripts', `${sessionId}.jsonl`),
+]
 
-  const directTranscriptPath = join(claudeHome, 'transcripts', `${sessionId}.jsonl`)
-  if (await fileExists(directTranscriptPath)) return directTranscriptPath
+const transcriptCandidatePaths = ({ claudeHome, cwd, sessionId, stopEvent }: {
+  claudeHome: string
+  cwd: string
+  sessionId: string
+  stopEvent: HookEvent
+}) => [
+  firstString(stopEvent.transcriptPath),
+  ...deterministicTranscriptPaths({ cwd, sessionId, claudeHome }),
+].filter((path): path is string => path !== null)
+
+const firstExistingPath = async (paths: string[]) => {
+  for (const path of paths) {
+    if (await fileExists(path)) return path
+  }
 
   return null
-}
-
-export const findClaudeTranscriptPath = async ({ cwd, sessionId, claudeHome = join(homedir(), '.claude') }: {
-  cwd: string
-  sessionId: string
-  claudeHome?: string
-}) => {
-  const directPath = await findDirectClaudeTranscriptPath({ cwd, sessionId, claudeHome })
-  if (directPath !== null) return directPath
-
-  const projectFiles = await collectJsonlFiles({ root: join(claudeHome, 'projects') })
-  return projectFiles.find((path) => path.endsWith(`/${sessionId}.jsonl`)) || null
 }
 
 const parseJsonLine = (line: string): unknown => {
@@ -458,57 +446,84 @@ export const parseTranscriptAnswer = (raw: string) => {
   return null
 }
 
+export const resolveClaudeTranscriptPath = async ({
+  claudeHome = join(homedir(), '.claude'),
+  cwd,
+  sessionId,
+  stopEvent,
+}: {
+  claudeHome?: string
+  cwd: string
+  sessionId: string
+  stopEvent: HookEvent
+}) => firstExistingPath(transcriptCandidatePaths({ claudeHome, cwd, sessionId, stopEvent }))
+
 const waitForTranscriptAnswer = async ({ cwd, deadlineMs, sessionId, stopEvent }: {
   cwd: string
   deadlineMs: number
   sessionId: string
   stopEvent: HookEvent
-}) => {
-  const stopAnswer = firstString(stopEvent.lastAssistantMessage)
-  if (stopAnswer !== null) return stopAnswer
+}) => waitUntil({
+  deadlineMs,
+  timeoutMessage: 'Claude TUI adviser could not find a final assistant answer in the Claude transcript.',
+  getValue: async () => {
+    const transcriptPath = await resolveClaudeTranscriptPath({ cwd, sessionId, stopEvent })
+    if (transcriptPath === null) return null
+    return parseTranscriptAnswer(await readFile(transcriptPath, 'utf8'))
+  },
+})
 
-  return waitForTranscriptFallback({ cwd, deadlineMs, sessionId, stopEvent })
-}
+// Session orchestration
 
-const waitForTranscriptFallback = async ({ cwd, deadlineMs, sessionId, stopEvent }: {
+export const buildHandoff = ({ answer, cwd, mode, sessionId }: {
+  answer: string
   cwd: string
-  deadlineMs: number
+  mode: Mode
   sessionId: string
-  stopEvent: HookEvent
-}) => {
-  const fallbackScanAt = Date.now() + FALLBACK_TRANSCRIPT_SCAN_MS
-  while (Date.now() < deadlineMs) {
-    const transcriptPath = await findTranscriptPathForPoll({ cwd, fallbackScanAt, sessionId, stopEvent })
-    if (transcriptPath !== null) {
-      const answer = parseTranscriptAnswer(await readFile(transcriptPath, 'utf8'))
-      if (answer !== null) return answer
-    }
+}) => ({
+  ok: true,
+  schemaVersion: 1,
+  mode,
+  sessionId,
+  cwd,
+  createdAt: new Date().toISOString(),
+  source: 'claude-tui',
+  answer,
+})
 
-    await sleep(Math.min(HOOK_POLL_MS, Math.max(1, deadlineMs - Date.now())))
+export const runAdviser = async ({ mode, input, timeoutMs, cwd = process.cwd() }: {
+  mode: Mode
+  input: string
+  timeoutMs: number
+  cwd?: string
+}) => {
+  const deadlineMs = Date.now() + timeoutMs
+  await assertRuntimeBinary({
+    command: 'tmux',
+    args: ['-V'],
+    label: '`tmux`',
+    timeoutMs: remainingTimeoutMs(deadlineMs),
+  })
+  await assertRuntimeBinary({
+    command: 'claude',
+    args: ['--version'],
+    label: 'Claude Code CLI `claude`',
+    timeoutMs: remainingTimeoutMs(deadlineMs),
+  })
+
+  const sessionId = randomUUID()
+  const sessionName = `codex-claude-${sessionId.slice(0, 8)}`
+  const prompt = buildClaudePrompt({ mode, input, cwd })
+  const runtimeFiles = await createRuntimeFiles()
+
+  try {
+    return await runAdviserSession({ cwd, deadlineMs, mode, prompt, runtimeFiles, sessionId, sessionName })
+  } catch (error) {
+    throw await appendTmuxPaneToError({ error, sessionName })
+  } finally {
+    await killTmuxSession(sessionName)
+    await cleanupRuntimeFiles(runtimeFiles.runtimeDir)
   }
-
-  throw new Error('Claude TUI adviser could not find a final assistant answer in the Claude transcript.')
-}
-
-const findTranscriptPathForPoll = async ({ cwd, fallbackScanAt, sessionId, stopEvent }: {
-  cwd: string
-  fallbackScanAt: number
-  sessionId: string
-  stopEvent: HookEvent
-}) => {
-  const stopTranscriptPath = await existingStopTranscriptPath(stopEvent)
-  if (stopTranscriptPath !== null) return stopTranscriptPath
-
-  const directPath = await findDirectClaudeTranscriptPath({ cwd, sessionId })
-  if (directPath !== null) return directPath
-
-  return Date.now() >= fallbackScanAt ? findClaudeTranscriptPath({ cwd, sessionId }) : null
-}
-
-const existingStopTranscriptPath = async (stopEvent: HookEvent) => {
-  const stopTranscriptPath = firstString(stopEvent.transcriptPath)
-  if (stopTranscriptPath === null) return null
-  return await fileExists(stopTranscriptPath) ? stopTranscriptPath : null
 }
 
 const captureTmuxPane = async (sessionName: string) => {
@@ -520,6 +535,28 @@ const captureTmuxPane = async (sessionName: string) => {
     return stdout.trim()
   } catch {
     return null
+  }
+}
+
+const createPaneStreamer = ({ sessionName }: {
+  sessionName: string
+}) => {
+  if (!isPaneStreamingEnabled()) return { stop: () => undefined }
+
+  let lastPane = ''
+  const streamPane = async () => {
+    const pane = await captureTmuxPane(sessionName)
+    if (pane === null || pane === lastPane) return
+    lastPane = pane
+    process.stderr.write(`\n[${sessionName} pane]\n${pane}\n`)
+  }
+  const interval = setInterval(() => {
+    void streamPane()
+  }, PANE_STREAM_POLL_MS)
+
+  void streamPane()
+  return {
+    stop: () => clearInterval(interval),
   }
 }
 
@@ -540,59 +577,6 @@ const cleanupRuntimeFiles = async (runtimeDir: string) => {
   }
 }
 
-export const buildHandoff = ({ answer, cwd, mode, sessionId }: {
-  answer: string
-  cwd: string
-  mode: Mode
-  sessionId: string
-}) => ({
-  ok: true,
-  schemaVersion: 1,
-  mode,
-  sessionId,
-  cwd,
-  createdAt: new Date().toISOString(),
-  source: 'claude-tui',
-  answer,
-})
-
-export const classifyLaunchFailure = (error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error)
-  const knownFailure = ([
-    [/requires tmux on PATH|spawn tmux ENOENT/, 'Claude TUI adviser requires `tmux` on PATH.'],
-    [/requires Claude Code CLI on PATH|spawn claude ENOENT/, 'Claude TUI adviser requires `claude` on PATH.'],
-    [/timed out waiting for Stop|timed out after/, 'Claude TUI adviser timed out before producing a handoff.'],
-    [/could not find a final assistant answer/, 'Claude TUI adviser could not find a final assistant answer in the Claude transcript.'],
-  ] satisfies [RegExp, string][]).find(([pattern]) => pattern.test(message))
-
-  return knownFailure?.[1] || `Claude TUI adviser failed: ${message}`
-}
-
-export const runAdviser = async ({ mode, input, timeoutMs, cwd = process.cwd() }: {
-  mode: Mode
-  input: string
-  timeoutMs: number
-  cwd?: string
-}) => {
-  const deadlineMs = Date.now() + timeoutMs
-  await assertRuntimeBinary({ command: 'tmux', args: ['-V'], label: '`tmux`' })
-  await assertRuntimeBinary({ command: 'claude', args: ['--version'], label: 'Claude Code CLI `claude`' })
-
-  const sessionId = randomUUID()
-  const sessionName = `codex-claude-${sessionId.slice(0, 8)}`
-  const prompt = buildClaudePrompt({ mode, input, cwd })
-  const runtimeFiles = await createRuntimeFiles()
-
-  try {
-    return await runAdviserSession({ cwd, deadlineMs, mode, prompt, runtimeFiles, sessionId, sessionName })
-  } catch (error) {
-    throw await appendTmuxPaneToError({ error, sessionName })
-  } finally {
-    await killTmuxSession(sessionName)
-    await cleanupRuntimeFiles(runtimeFiles.runtimeDir)
-  }
-}
-
 const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, sessionId, sessionName }: {
   cwd: string
   deadlineMs: number
@@ -604,16 +588,33 @@ const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, 
 }) => {
   const { command, args } = buildTmuxStartInvocation({
     cwd,
-    prompt,
+    mode,
     sessionId,
     sessionName,
     settingsPath: runtimeFiles.settingsPath,
   })
   await execCommand({ command, args, cwd, timeoutMs: remainingTimeoutMs(deadlineMs) })
-  await waitForHookEvent({ deadlineMs, event: 'SessionStart', eventLogPath: runtimeFiles.eventLogPath })
-  const stopEvent = await waitForHookEvent({ deadlineMs, event: 'Stop', eventLogPath: runtimeFiles.eventLogPath })
-  const answer = await waitForTranscriptAnswer({ cwd, deadlineMs, sessionId, stopEvent })
-  return buildHandoff({ answer, cwd, mode, sessionId })
+  const paneStreamer = createPaneStreamer({ sessionName })
+  try {
+    await waitForHookEvent({ deadlineMs, event: 'SessionStart', eventLogPath: runtimeFiles.eventLogPath })
+    await submitPromptToClaudeTui({ deadlineMs, prompt, sessionName })
+    const stopEvent = await waitForHookEvent({ deadlineMs, event: 'Stop', eventLogPath: runtimeFiles.eventLogPath })
+    const answer = await waitForTranscriptAnswer({ cwd, deadlineMs, sessionId, stopEvent })
+    return buildHandoff({ answer, cwd, mode, sessionId })
+  } finally {
+    paneStreamer.stop()
+  }
+}
+
+const submitPromptToClaudeTui = async ({ deadlineMs, prompt, sessionName }: {
+  deadlineMs: number
+  prompt: string
+  sessionName: string
+}) => {
+  const bufferName = `${sessionName}-prompt`
+  for (const { command, args } of buildTmuxPromptSubmissionInvocations({ bufferName, prompt, sessionName })) {
+    await execCommand({ command, args, timeoutMs: remainingTimeoutMs(deadlineMs) })
+  }
 }
 
 const appendTmuxPaneToError = async ({ error, sessionName }: {
@@ -623,6 +624,21 @@ const appendTmuxPaneToError = async ({ error, sessionName }: {
   const capturedPane = await captureTmuxPane(sessionName)
   const message = error instanceof Error ? error.message : String(error)
   return new Error(capturedPane === null ? message : `${message}\n\nLast tmux pane:\n${capturedPane}`)
+}
+
+// Error classification and CLI entrypoint
+
+export const classifyLaunchFailure = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error)
+  const knownFailure = ([
+    [/requires `?tmux`? on PATH|spawn tmux ENOENT/, 'Claude TUI adviser requires `tmux` on PATH.'],
+    [/requires Claude Code CLI(?: `?claude`?)? on PATH|spawn claude ENOENT/, 'Claude TUI adviser requires `claude` on PATH.'],
+    [/Please run \/login|Invalid authentication credentials/, 'Claude TUI adviser requires Claude authentication. Run `claude /login`.'],
+    [/timed out waiting for Stop|timed out after/, 'Claude TUI adviser timed out before producing a handoff.'],
+    [/could not find a final assistant answer/, 'Claude TUI adviser could not find a final assistant answer in the Claude transcript.'],
+  ] satisfies [RegExp, string][]).find(([pattern]) => pattern.test(message))
+
+  return knownFailure?.[1] || `Claude TUI adviser failed: ${message}`
 }
 
 const main = async () => {

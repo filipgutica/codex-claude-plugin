@@ -84,11 +84,13 @@ version commands needed.
 
 The `claude-plugin` Codex plugin includes:
 
-- `plan` - invokes the local Claude TUI runtime for an ephemeral read-only
-  Claude session and folds the JSON handoff into Codex's own plan after
-  validation.
+- `plan` - invokes the local Claude TUI runtime in Claude Plan Mode for an
+  ephemeral read-only Claude session and folds the JSON handoff into Codex's own
+  plan after validation.
 - `review` - uses the same local TUI runtime for advisory code review, then has
-  Codex validate and separate confirmed, rejected, and actionable findings.
+  Codex validate and separate confirmed, rejected, and actionable findings. The
+  review runtime pins Claude Code to `--model sonnet` and read-only tools
+  instead of Claude Plan Mode.
 
 The Claude adviser helper intentionally avoids `claude -p` and external PTY
 wrappers. It runs the authenticated local Claude CLI in interactive mode inside

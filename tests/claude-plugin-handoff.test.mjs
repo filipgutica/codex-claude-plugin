@@ -8,13 +8,14 @@ import {
   buildClaudeArgs,
   buildClaudePrompt,
   buildHandoff,
+  buildTmuxPromptSubmissionInvocations,
   buildTmuxStartInvocation,
   classifyLaunchFailure,
-  findDirectClaudeTranscriptPath,
-  findClaudeTranscriptPath,
+  isPaneStreamingEnabled,
   parseArgs,
   parseTranscriptAnswer,
   projectDirectoryName,
+  resolveClaudeTranscriptPath,
 } from '../plugins/claude-plugin/scripts/claude-tui-adviser.mjs'
 
 describe('claude tui adviser prompt and args', () => {
@@ -46,7 +47,7 @@ describe('claude tui adviser prompt and args', () => {
   it('builds Claude TUI args for plan mode and a read-only tool set', () => {
     expect(
       buildClaudeArgs({
-        prompt: 'prompt',
+        mode: 'plan',
         sessionId: '123e4567-e89b-12d3-a456-426614174000',
         settingsPath: '/tmp/settings.json',
       }),
@@ -59,14 +60,32 @@ describe('claude tui adviser prompt and args', () => {
       '123e4567-e89b-12d3-a456-426614174000',
       '--settings',
       '/tmp/settings.json',
-      'prompt',
     ])
   })
 
-  it('builds a tmux invocation for the local Claude TUI runtime', () => {
+  it('builds Claude TUI args for review mode with Sonnet and a read-only tool set', () => {
+    expect(
+      buildClaudeArgs({
+        mode: 'review',
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        settingsPath: '/tmp/settings.json',
+      }),
+    ).toEqual([
+      '--model',
+      'sonnet',
+      '--tools',
+      'Read,Glob,Grep,LS',
+      '--session-id',
+      '123e4567-e89b-12d3-a456-426614174000',
+      '--settings',
+      '/tmp/settings.json',
+    ])
+  })
+
+  it('builds a tmux invocation for the local Claude TUI plan runtime', () => {
     const invocation = buildTmuxStartInvocation({
       cwd: '/repo',
-      prompt: "plan O'Hara",
+      mode: 'plan',
       sessionId: 'session-1',
       sessionName: 'codex-claude-session',
       settingsPath: '/tmp/settings.json',
@@ -75,9 +94,50 @@ describe('claude tui adviser prompt and args', () => {
     expect(invocation.command).toBe('tmux')
     expect(invocation.args.slice(0, 5)).toEqual(['new-session', '-d', '-s', 'codex-claude-session', '-c'])
     expect(invocation.args).toContain('/repo')
-    expect(invocation.args.at(-1)).toContain("'claude'")
-    expect(invocation.args.at(-1)).toContain("'--permission-mode'")
-    expect(invocation.args.at(-1)).toContain("'plan O'\\''Hara'")
+    expect(invocation.args.at(-1)).toBe(
+      "'claude' '--permission-mode' 'plan' '--tools' 'Read,Glob,Grep,LS' '--session-id' 'session-1' '--settings' '/tmp/settings.json'",
+    )
+  })
+
+  it('builds a tmux invocation for the local Claude TUI review runtime', () => {
+    const invocation = buildTmuxStartInvocation({
+      cwd: '/repo',
+      mode: 'review',
+      sessionId: 'session-1',
+      sessionName: 'codex-claude-session',
+      settingsPath: '/tmp/settings.json',
+    })
+
+    expect(invocation.args.at(-1)).toBe(
+      "'claude' '--model' 'sonnet' '--tools' 'Read,Glob,Grep,LS' '--session-id' 'session-1' '--settings' '/tmp/settings.json'",
+    )
+  })
+
+  it('builds tmux invocations that paste and submit the prompt after TUI startup', () => {
+    expect(
+      buildTmuxPromptSubmissionInvocations({
+        bufferName: 'codex-claude-session-prompt',
+        prompt: "plan O'Hara\nwith newline",
+        sessionName: 'codex-claude-session',
+      }),
+    ).toEqual([
+      {
+        command: 'tmux',
+        args: ['set-buffer', '-b', 'codex-claude-session-prompt', "plan O'Hara\nwith newline"],
+      },
+      {
+        command: 'tmux',
+        args: ['paste-buffer', '-p', '-b', 'codex-claude-session-prompt', '-t', 'codex-claude-session'],
+      },
+      {
+        command: 'tmux',
+        args: ['delete-buffer', '-b', 'codex-claude-session-prompt'],
+      },
+      {
+        command: 'tmux',
+        args: ['send-keys', '-t', 'codex-claude-session', 'Enter'],
+      },
+    ])
   })
 
   it('parses CLI mode and timeout', () => {
@@ -89,6 +149,27 @@ describe('claude tui adviser prompt and args', () => {
 
   it('rejects --timeout-ms without a value', () => {
     expect(() => parseArgs(['review', '--timeout-ms'])).toThrow('--timeout-ms requires a value')
+  })
+
+  it('enables pane streaming only when explicitly requested', () => {
+    const originalValue = process.env.CODEX_CLAUDE_STREAM_PANE
+
+    try {
+      delete process.env.CODEX_CLAUDE_STREAM_PANE
+      expect(isPaneStreamingEnabled()).toBe(false)
+
+      process.env.CODEX_CLAUDE_STREAM_PANE = '1'
+      expect(isPaneStreamingEnabled()).toBe(true)
+
+      process.env.CODEX_CLAUDE_STREAM_PANE = 'true'
+      expect(isPaneStreamingEnabled()).toBe(false)
+    } finally {
+      if (originalValue === undefined) {
+        delete process.env.CODEX_CLAUDE_STREAM_PANE
+      } else {
+        process.env.CODEX_CLAUDE_STREAM_PANE = originalValue
+      }
+    }
   })
 })
 
@@ -112,7 +193,27 @@ describe('Claude transcript parsing and failures', () => {
     expect(parseTranscriptAnswer(raw)).toBe('Use the tmux runtime.')
   })
 
-  it('finds a direct Claude project transcript path', async () => {
+  it('resolves a Stop hook transcript path before deterministic fallbacks', async () => {
+    const claudeHome = await mkdtemp(join(tmpdir(), 'claude-home-'))
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'claude-runtime-'))
+    const transcriptPath = join(runtimeDir, 'stop-transcript.jsonl')
+
+    await writeFile(transcriptPath, '{}\n')
+
+    try {
+      await expect(resolveClaudeTranscriptPath({
+        cwd: '/repo/path',
+        sessionId: 'session-1',
+        stopEvent: { event: 'Stop', transcriptPath },
+        claudeHome,
+      })).resolves.toBe(transcriptPath)
+    } finally {
+      await rm(claudeHome, { force: true, recursive: true })
+      await rm(runtimeDir, { force: true, recursive: true })
+    }
+  })
+
+  it('falls back to a deterministic Claude project transcript path', async () => {
     const claudeHome = await mkdtemp(join(tmpdir(), 'claude-home-'))
     const cwd = '/repo/path'
     const sessionId = 'session-1'
@@ -123,19 +224,28 @@ describe('Claude transcript parsing and failures', () => {
     await writeFile(transcriptPath, '{}\n')
 
     try {
-      await expect(findClaudeTranscriptPath({ cwd, sessionId, claudeHome })).resolves.toBe(transcriptPath)
+      await expect(resolveClaudeTranscriptPath({
+        cwd,
+        sessionId,
+        stopEvent: { event: 'Stop' },
+        claudeHome,
+      })).resolves.toBe(transcriptPath)
     } finally {
       await rm(claudeHome, { force: true, recursive: true })
     }
   })
 
-  it('finds only deterministic direct transcript paths without fallback scanning', async () => {
+  it('does not recursively scan for transcript paths outside deterministic locations', async () => {
     const claudeHome = await mkdtemp(join(tmpdir(), 'claude-home-'))
+    const scannedFallbackDir = join(claudeHome, 'projects', 'other-project')
+    await mkdir(scannedFallbackDir, { recursive: true })
+    await writeFile(join(scannedFallbackDir, 'missing-session.jsonl'), '{}\n')
 
     try {
-      await expect(findDirectClaudeTranscriptPath({
+      await expect(resolveClaudeTranscriptPath({
         cwd: '/repo/path',
         sessionId: 'missing-session',
+        stopEvent: { event: 'Stop' },
         claudeHome,
       })).resolves.toBeNull()
     } finally {
@@ -173,10 +283,22 @@ describe('Claude transcript parsing and failures', () => {
 
   it('classifies missing tmux failures', () => {
     expect(classifyLaunchFailure(new Error('spawn tmux ENOENT'))).toBe('Claude TUI adviser requires `tmux` on PATH.')
+    expect(classifyLaunchFailure(new Error('Claude TUI adviser requires `tmux` on PATH.'))).toBe(
+      'Claude TUI adviser requires `tmux` on PATH.',
+    )
   })
 
   it('classifies missing Claude CLI failures', () => {
     expect(classifyLaunchFailure(new Error('spawn claude ENOENT'))).toBe('Claude TUI adviser requires `claude` on PATH.')
+    expect(classifyLaunchFailure(new Error('Claude TUI adviser requires Claude Code CLI `claude` on PATH.'))).toBe(
+      'Claude TUI adviser requires `claude` on PATH.',
+    )
+  })
+
+  it('classifies Claude authentication failures from captured panes', () => {
+    expect(classifyLaunchFailure(new Error('Last tmux pane:\nPlease run /login · API Error: 401 Invalid authentication credentials'))).toBe(
+      'Claude TUI adviser requires Claude authentication. Run `claude /login`.',
+    )
   })
 
   it('classifies timeout failures', () => {
