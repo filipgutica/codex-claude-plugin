@@ -92,7 +92,7 @@ describe('claude tui adviser prompt and args', () => {
       },
       {
         command: 'tmux',
-        args: ['paste-buffer', '-b', 'codex-claude-session-prompt', '-t', 'codex-claude-session'],
+        args: ['paste-buffer', '-p', '-b', 'codex-claude-session-prompt', '-t', 'codex-claude-session'],
       },
       {
         command: 'tmux',

@@ -166,7 +166,8 @@ export const buildTmuxPromptSubmissionInvocations = ({ bufferName, prompt, sessi
   },
   {
     command: 'tmux',
-    args: ['paste-buffer', '-b', bufferName, '-t', sessionName],
+    // Preserve multi-line prompts as one bracketed paste before sending Enter.
+    args: ['paste-buffer', '-p', '-b', bufferName, '-t', sessionName],
   },
   {
     command: 'tmux',
