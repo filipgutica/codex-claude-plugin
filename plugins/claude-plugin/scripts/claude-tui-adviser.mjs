@@ -468,7 +468,7 @@ export const classifyLaunchFailure = (error) => {
         [/requires `?tmux`? on PATH|spawn tmux ENOENT/, 'Claude TUI adviser requires `tmux` on PATH.'],
         [/requires Claude Code CLI(?: `?claude`?)? on PATH|spawn claude ENOENT/, 'Claude TUI adviser requires `claude` on PATH.'],
         [/Please run \/login|Invalid authentication credentials/, 'Claude TUI adviser requires Claude authentication. Run `claude /login`.'],
-        [/timed out waiting for Stop|timed out after/, 'Claude TUI adviser timed out before producing a handoff.'],
+        [/timed out waiting for (?:SessionStart|Stop)|timed out after/, 'Claude TUI adviser timed out before producing a handoff.'],
         [/could not find a final assistant answer/, 'Claude TUI adviser could not find a final assistant answer in the Claude transcript.'],
     ].find(([pattern]) => pattern.test(message));
     return knownFailure?.[1] || `Claude TUI adviser failed: ${message}`;

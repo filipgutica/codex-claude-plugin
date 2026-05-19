@@ -302,6 +302,9 @@ describe('Claude transcript parsing and failures', () => {
   })
 
   it('classifies timeout failures', () => {
+    expect(classifyLaunchFailure(new Error('Claude TUI adviser timed out waiting for SessionStart.'))).toBe(
+      'Claude TUI adviser timed out before producing a handoff.',
+    )
     expect(classifyLaunchFailure(new Error('Claude TUI adviser timed out waiting for Stop.'))).toBe(
       'Claude TUI adviser timed out before producing a handoff.',
     )
