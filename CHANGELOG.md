@@ -1,3 +1,21 @@
+# [0.12.0](https://github.com/filipgutica/codex-claude-plugin/compare/v0.11.0...v0.12.0) (2026-05-20)
+
+
+### Bug Fixes
+
+* classify Claude startup timeouts ([50fdc90](https://github.com/filipgutica/codex-claude-plugin/commit/50fdc9072c9d777d0a5d60cdea39704d235039ae))
+* classify wrapped Claude runtime errors ([7b99593](https://github.com/filipgutica/codex-claude-plugin/commit/7b9959369f083fc517d37b74a77be3293efeff98))
+* submit Claude TUI prompts after startup ([c80f245](https://github.com/filipgutica/codex-claude-plugin/commit/c80f245f2a69407a287893a1d51fbe3291f68a2c))
+* support trusted Claude wrapper prompts ([bf65448](https://github.com/filipgutica/codex-claude-plugin/commit/bf65448f0ebb48364dbdf6cfe320626ca81f6333))
+* use bracketed paste for Claude prompts ([ba459d6](https://github.com/filipgutica/codex-claude-plugin/commit/ba459d6e4811980544654f94c10163c322bbce6d))
+* use sonnet for Claude reviews ([666fc33](https://github.com/filipgutica/codex-claude-plugin/commit/666fc33368e02b5b8bcd664ab90237f2664ac19f))
+
+
+### Features
+
+* add Claude wrapper setup skill ([eff225a](https://github.com/filipgutica/codex-claude-plugin/commit/eff225a1437b4f60a2c6ff452bfaec0a6183d042))
+* stream Claude TUI pane diagnostics ([82fd779](https://github.com/filipgutica/codex-claude-plugin/commit/82fd779806da27474d4a3cd91395f8119331a392))
+
 # [0.11.0](https://github.com/filipgutica/codex-claude-plugin/compare/v0.10.1...v0.11.0) (2026-05-14)
 
 
