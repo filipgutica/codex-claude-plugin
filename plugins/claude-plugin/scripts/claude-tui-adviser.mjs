@@ -19,6 +19,17 @@ const readStdin = async () => {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     return Buffer.concat(chunks).toString('utf8');
 };
+const readInput = async ({ prompt, promptFile }) => {
+    assertSinglePromptInput({ prompt, promptFile });
+    return await readProvidedPrompt({ prompt, promptFile }) ?? await readStdin();
+};
+const readProvidedPrompt = async ({ prompt, promptFile }) => {
+    if (prompt !== undefined)
+        return prompt;
+    if (promptFile !== undefined)
+        return readFile(promptFile, 'utf8');
+    return null;
+};
 const firstString = (...values) => values.find((value) => typeof value === 'string' && value.trim() !== '') || null;
 const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 const waitUntil = async ({ deadlineMs, getValue, timeoutMessage }) => {
@@ -71,25 +82,49 @@ export const buildClaudePrompt = ({ mode, input, cwd = process.cwd() }) => {
 export const parseArgs = (argv) => {
     const [mode, ...args] = argv;
     if (!isMode(mode)) {
-        throw new Error('Usage: claude-tui-adviser.mjs <plan|review> [--timeout-ms <milliseconds>]');
+        throw new Error('Usage: claude-tui-adviser.mjs <plan|review> [--timeout-ms <milliseconds>] [--prompt <text> | --prompt-file <path>]');
     }
-    return { mode, timeoutMs: parseOptions(args) };
+    return { mode, ...parseOptions(args) };
 };
 const isMode = (value) => value === 'plan' || value === 'review';
 const parseOptions = (args) => {
-    if (args.length === 0)
-        return DEFAULT_TIMEOUT_MS;
-    if (args[0] !== '--timeout-ms')
-        throw new Error(`Unknown option: ${args[0]}`);
-    return parseTimeoutOptionValue(args);
-};
-const parseTimeoutOptionValue = (args) => {
-    if (args[1] === undefined) {
-        throw new Error('--timeout-ms requires a value.');
+    const parsed = { timeoutMs: DEFAULT_TIMEOUT_MS };
+    for (let index = 0; index < args.length; index += 1) {
+        const option = args[index];
+        const value = optionValue({ args, index, option });
+        applyOption({ parsed, option, value });
+        index += 1;
     }
-    if (args.length > 2)
-        throw new Error(`Unknown option: ${args[2]}`);
-    return parseTimeoutMs(args[1]);
+    assertSinglePromptInput(parsed);
+    return parsed;
+};
+const optionValue = ({ args, index, option }) => {
+    const value = args[index + 1];
+    if (value === undefined)
+        throw new Error(`${option} requires a value.`);
+    return value;
+};
+const applyOption = ({ parsed, option, value }) => {
+    const optionHandlers = {
+        '--timeout-ms': () => {
+            parsed.timeoutMs = parseTimeoutMs(value);
+        },
+        '--prompt': () => {
+            parsed.prompt = value;
+        },
+        '--prompt-file': () => {
+            parsed.promptFile = value;
+        },
+    };
+    const handler = optionHandlers[option];
+    if (handler === undefined)
+        throw new Error(`Unknown option: ${option}`);
+    handler();
+};
+const assertSinglePromptInput = ({ prompt, promptFile }) => {
+    if (prompt !== undefined && promptFile !== undefined) {
+        throw new Error('Use only one of --prompt or --prompt-file.');
+    }
 };
 const parseTimeoutMs = (rawValue) => {
     const value = Number(rawValue);
@@ -121,10 +156,10 @@ export const buildTmuxStartInvocation = ({ cwd, mode, sessionId, sessionName, se
         shellJoin(['claude', ...buildClaudeArgs({ mode, sessionId, settingsPath })]),
     ],
 });
-export const buildTmuxPromptSubmissionInvocations = ({ bufferName, prompt, sessionName }) => [
+export const buildTmuxPromptSubmissionInvocations = ({ bufferName, promptPath, sessionName }) => [
     {
         command: 'tmux',
-        args: ['set-buffer', '-b', bufferName, prompt],
+        args: ['load-buffer', '-b', bufferName, promptPath],
     },
     {
         command: 'tmux',
@@ -192,6 +227,7 @@ const createRuntimeFiles = async () => {
     const runtimeDir = await mkdtemp(join(tmpdir(), 'codex-claude-tui-'));
     const eventLogPath = join(runtimeDir, 'events.jsonl');
     const hookPath = join(runtimeDir, 'hook.mjs');
+    const promptPath = join(runtimeDir, 'prompt.txt');
     const settingsPath = join(runtimeDir, 'settings.json');
     await writeFile(hookPath, [
         "import { appendFileSync } from 'node:fs'",
@@ -224,7 +260,7 @@ const createRuntimeFiles = async () => {
         },
     };
     await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
-    return { eventLogPath, hookPath, settingsPath, runtimeDir };
+    return { eventLogPath, hookPath, promptPath, settingsPath, runtimeDir };
 };
 // Hook waiting and transcript reading
 const readHookEvents = async (eventLogPath) => {
@@ -369,8 +405,9 @@ export const runAdviser = async ({ mode, input, timeoutMs, cwd = process.cwd() }
     const sessionName = `codex-claude-${sessionId.slice(0, 8)}`;
     const prompt = buildClaudePrompt({ mode, input, cwd });
     const runtimeFiles = await createRuntimeFiles();
+    await writeFile(runtimeFiles.promptPath, prompt, 'utf8');
     try {
-        return await runAdviserSession({ cwd, deadlineMs, mode, prompt, runtimeFiles, sessionId, sessionName });
+        return await runAdviserSession({ cwd, deadlineMs, mode, runtimeFiles, sessionId, sessionName });
     }
     catch (error) {
         throw await appendTmuxPaneToError({ error, sessionName });
@@ -429,7 +466,7 @@ const cleanupRuntimeFiles = async (runtimeDir) => {
         // Runtime directory cleanup is best-effort and must not mask the adviser result.
     }
 };
-const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, sessionId, sessionName }) => {
+const runAdviserSession = async ({ cwd, deadlineMs, mode, runtimeFiles, sessionId, sessionName }) => {
     const { command, args } = buildTmuxStartInvocation({
         cwd,
         mode,
@@ -441,7 +478,7 @@ const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, 
     const paneStreamer = createPaneStreamer({ sessionName });
     try {
         await waitForHookEvent({ deadlineMs, event: 'SessionStart', eventLogPath: runtimeFiles.eventLogPath });
-        await submitPromptToClaudeTui({ deadlineMs, prompt, sessionName });
+        await submitPromptToClaudeTui({ deadlineMs, promptPath: runtimeFiles.promptPath, sessionName });
         const stopEvent = await waitForHookEvent({ deadlineMs, event: 'Stop', eventLogPath: runtimeFiles.eventLogPath });
         const answer = await waitForTranscriptAnswer({ cwd, deadlineMs, sessionId, stopEvent });
         return buildHandoff({ answer, cwd, mode, sessionId });
@@ -450,9 +487,9 @@ const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, 
         paneStreamer.stop();
     }
 };
-const submitPromptToClaudeTui = async ({ deadlineMs, prompt, sessionName }) => {
+const submitPromptToClaudeTui = async ({ deadlineMs, promptPath, sessionName }) => {
     const bufferName = `${sessionName}-prompt`;
-    for (const { command, args } of buildTmuxPromptSubmissionInvocations({ bufferName, prompt, sessionName })) {
+    for (const { command, args } of buildTmuxPromptSubmissionInvocations({ bufferName, promptPath, sessionName })) {
         await execCommand({ command, args, timeoutMs: remainingTimeoutMs(deadlineMs) });
     }
 };
@@ -474,8 +511,8 @@ export const classifyLaunchFailure = (error) => {
     return knownFailure?.[1] || `Claude TUI adviser failed: ${message}`;
 };
 const main = async () => {
-    const { mode, timeoutMs } = parseArgs(process.argv.slice(2));
-    const input = await readStdin();
+    const { mode, prompt, promptFile, timeoutMs } = parseArgs(process.argv.slice(2));
+    const input = await readInput({ prompt, promptFile });
     const handoff = await runAdviser({ mode, input, timeoutMs });
     process.stdout.write(`${JSON.stringify(handoff, null, 2)}\n`);
 };

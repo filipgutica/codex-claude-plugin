@@ -43,6 +43,10 @@ prefix_rule(pattern=["codex-claude-review-stream"], decision="allow")
 prefix_rule(pattern=["codex-claude-plan-stream"], decision="allow")
 ```
 
+   The review and plan skills call these wrappers directly with `--prompt` or
+   `--prompt-file`, so Codex can match the wrapper command prefix without
+   trusting a shell pipeline.
+
 5. Remind the user to restart Codex after editing `default.rules`.
 
 ## Failure Handling

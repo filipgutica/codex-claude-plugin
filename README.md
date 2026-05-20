@@ -123,7 +123,9 @@ codex-claude-plan-stream
 
 The setup command uses the installed plugin cache and does not require cloning
 this repository. The wrappers resolve the latest installed plugin helper at
-runtime.
+runtime. Skills invoke these wrappers directly with `--prompt` or
+`--prompt-file`, so the trusted command is the wrapper itself rather than a
+shell pipeline.
 
 To remove the wrapper commands later, run `$claude-plugin:setup` with the
 uninstall workflow, or run the installed setup script with `--uninstall`.

@@ -13,6 +13,7 @@ type Mode = 'plan' | 'review'
 type RuntimeFiles = {
   eventLogPath: string
   hookPath: string
+  promptPath: string
   settingsPath: string
   runtimeDir: string
 }
@@ -20,6 +21,13 @@ type RuntimeFiles = {
 type CommandResult = {
   stdout: string
   stderr: string
+}
+
+type ParsedArgs = {
+  mode: Mode
+  prompt?: string
+  promptFile?: string
+  timeoutMs: number
 }
 
 type HookEvent = {
@@ -41,6 +49,23 @@ const readStdin = async () => {
   const chunks: Buffer[] = []
   for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
   return Buffer.concat(chunks).toString('utf8')
+}
+
+const readInput = async ({ prompt, promptFile }: {
+  prompt?: string
+  promptFile?: string
+}) => {
+  assertSinglePromptInput({ prompt, promptFile })
+  return await readProvidedPrompt({ prompt, promptFile }) ?? await readStdin()
+}
+
+const readProvidedPrompt = async ({ prompt, promptFile }: {
+  prompt?: string
+  promptFile?: string
+}) => {
+  if (prompt !== undefined) return prompt
+  if (promptFile !== undefined) return readFile(promptFile, 'utf8')
+  return null
 }
 
 const firstString = (...values: unknown[]) =>
@@ -110,28 +135,64 @@ export const buildClaudePrompt = ({ mode, input, cwd = process.cwd() }: {
 export const parseArgs = (argv: string[]) => {
   const [mode, ...args] = argv
   if (!isMode(mode)) {
-    throw new Error('Usage: claude-tui-adviser.mjs <plan|review> [--timeout-ms <milliseconds>]')
+    throw new Error('Usage: claude-tui-adviser.mjs <plan|review> [--timeout-ms <milliseconds>] [--prompt <text> | --prompt-file <path>]')
   }
 
-  return { mode, timeoutMs: parseOptions(args) }
+  return { mode, ...parseOptions(args) }
 }
 
 const isMode = (value: unknown): value is Mode => value === 'plan' || value === 'review'
 
-const parseOptions = (args: string[]) => {
-  if (args.length === 0) return DEFAULT_TIMEOUT_MS
-  if (args[0] !== '--timeout-ms') throw new Error(`Unknown option: ${args[0]}`)
+const parseOptions = (args: string[]): Omit<ParsedArgs, 'mode'> => {
+  const parsed: Omit<ParsedArgs, 'mode'> = { timeoutMs: DEFAULT_TIMEOUT_MS }
 
-  return parseTimeoutOptionValue(args)
+  for (let index = 0; index < args.length; index += 1) {
+    const option = args[index]
+    const value = optionValue({ args, index, option })
+    applyOption({ parsed, option, value })
+    index += 1
+  }
+
+  assertSinglePromptInput(parsed)
+
+  return parsed
 }
 
-const parseTimeoutOptionValue = (args: string[]) => {
-  if (args[1] === undefined) {
-    throw new Error('--timeout-ms requires a value.')
-  }
-  if (args.length > 2) throw new Error(`Unknown option: ${args[2]}`)
+const optionValue = ({ args, index, option }: {
+  args: string[]
+  index: number
+  option: string
+}) => {
+  const value = args[index + 1]
+  if (value === undefined) throw new Error(`${option} requires a value.`)
+  return value
+}
 
-  return parseTimeoutMs(args[1])
+const applyOption = ({ parsed, option, value }: {
+  parsed: Omit<ParsedArgs, 'mode'>
+  option: string
+  value: string
+}) => {
+  const optionHandlers: Record<string, () => void> = {
+    '--timeout-ms': () => {
+      parsed.timeoutMs = parseTimeoutMs(value)
+    },
+    '--prompt': () => {
+      parsed.prompt = value
+    },
+    '--prompt-file': () => {
+      parsed.promptFile = value
+    },
+  }
+  const handler = optionHandlers[option]
+  if (handler === undefined) throw new Error(`Unknown option: ${option}`)
+  handler()
+}
+
+const assertSinglePromptInput = ({ prompt, promptFile }: Pick<ParsedArgs, 'prompt' | 'promptFile'>) => {
+  if (prompt !== undefined && promptFile !== undefined) {
+    throw new Error('Use only one of --prompt or --prompt-file.')
+  }
 }
 
 const parseTimeoutMs = (rawValue: string) => {
@@ -179,14 +240,14 @@ export const buildTmuxStartInvocation = ({ cwd, mode, sessionId, sessionName, se
   ],
 })
 
-export const buildTmuxPromptSubmissionInvocations = ({ bufferName, prompt, sessionName }: {
+export const buildTmuxPromptSubmissionInvocations = ({ bufferName, promptPath, sessionName }: {
   bufferName: string
-  prompt: string
+  promptPath: string
   sessionName: string
 }) => [
   {
     command: 'tmux',
-    args: ['set-buffer', '-b', bufferName, prompt],
+    args: ['load-buffer', '-b', bufferName, promptPath],
   },
   {
     command: 'tmux',
@@ -271,6 +332,7 @@ const createRuntimeFiles = async (): Promise<RuntimeFiles> => {
   const runtimeDir = await mkdtemp(join(tmpdir(), 'codex-claude-tui-'))
   const eventLogPath = join(runtimeDir, 'events.jsonl')
   const hookPath = join(runtimeDir, 'hook.mjs')
+  const promptPath = join(runtimeDir, 'prompt.txt')
   const settingsPath = join(runtimeDir, 'settings.json')
 
   await writeFile(hookPath, [
@@ -307,7 +369,7 @@ const createRuntimeFiles = async (): Promise<RuntimeFiles> => {
   }
   await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`)
 
-  return { eventLogPath, hookPath, settingsPath, runtimeDir }
+  return { eventLogPath, hookPath, promptPath, settingsPath, runtimeDir }
 }
 
 // Hook waiting and transcript reading
@@ -515,9 +577,10 @@ export const runAdviser = async ({ mode, input, timeoutMs, cwd = process.cwd() }
   const sessionName = `codex-claude-${sessionId.slice(0, 8)}`
   const prompt = buildClaudePrompt({ mode, input, cwd })
   const runtimeFiles = await createRuntimeFiles()
+  await writeFile(runtimeFiles.promptPath, prompt, 'utf8')
 
   try {
-    return await runAdviserSession({ cwd, deadlineMs, mode, prompt, runtimeFiles, sessionId, sessionName })
+    return await runAdviserSession({ cwd, deadlineMs, mode, runtimeFiles, sessionId, sessionName })
   } catch (error) {
     throw await appendTmuxPaneToError({ error, sessionName })
   } finally {
@@ -577,11 +640,10 @@ const cleanupRuntimeFiles = async (runtimeDir: string) => {
   }
 }
 
-const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, sessionId, sessionName }: {
+const runAdviserSession = async ({ cwd, deadlineMs, mode, runtimeFiles, sessionId, sessionName }: {
   cwd: string
   deadlineMs: number
   mode: Mode
-  prompt: string
   runtimeFiles: RuntimeFiles
   sessionId: string
   sessionName: string
@@ -597,7 +659,7 @@ const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, 
   const paneStreamer = createPaneStreamer({ sessionName })
   try {
     await waitForHookEvent({ deadlineMs, event: 'SessionStart', eventLogPath: runtimeFiles.eventLogPath })
-    await submitPromptToClaudeTui({ deadlineMs, prompt, sessionName })
+    await submitPromptToClaudeTui({ deadlineMs, promptPath: runtimeFiles.promptPath, sessionName })
     const stopEvent = await waitForHookEvent({ deadlineMs, event: 'Stop', eventLogPath: runtimeFiles.eventLogPath })
     const answer = await waitForTranscriptAnswer({ cwd, deadlineMs, sessionId, stopEvent })
     return buildHandoff({ answer, cwd, mode, sessionId })
@@ -606,13 +668,13 @@ const runAdviserSession = async ({ cwd, deadlineMs, mode, prompt, runtimeFiles, 
   }
 }
 
-const submitPromptToClaudeTui = async ({ deadlineMs, prompt, sessionName }: {
+const submitPromptToClaudeTui = async ({ deadlineMs, promptPath, sessionName }: {
   deadlineMs: number
-  prompt: string
+  promptPath: string
   sessionName: string
 }) => {
   const bufferName = `${sessionName}-prompt`
-  for (const { command, args } of buildTmuxPromptSubmissionInvocations({ bufferName, prompt, sessionName })) {
+  for (const { command, args } of buildTmuxPromptSubmissionInvocations({ bufferName, promptPath, sessionName })) {
     await execCommand({ command, args, timeoutMs: remainingTimeoutMs(deadlineMs) })
   }
 }
@@ -642,8 +704,8 @@ export const classifyLaunchFailure = (error: unknown) => {
 }
 
 const main = async () => {
-  const { mode, timeoutMs } = parseArgs(process.argv.slice(2))
-  const input = await readStdin()
+  const { mode, prompt, promptFile, timeoutMs } = parseArgs(process.argv.slice(2))
+  const input = await readInput({ prompt, promptFile })
   const handoff = await runAdviser({ mode, input, timeoutMs })
   process.stdout.write(`${JSON.stringify(handoff, null, 2)}\n`)
 }

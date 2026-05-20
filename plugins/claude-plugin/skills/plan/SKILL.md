@@ -12,12 +12,13 @@ final plan, scope control, and deciding what to implement.
 ## Workflow
 
 1. Summarize the user's goal, relevant constraints, and current repo context.
-2. Prefer the installed wrapper command. It reads the prompt from stdin and
+2. Prefer the installed wrapper command. Pass the request directly with
+   `--prompt`, or use `--prompt-file` for larger planning prompts. The wrapper
    drives the interactive Claude TUI through a local `tmux` session before
    returning JSON output:
 
 ```bash
-printf '%s' "<prompt>" | codex-claude-plan
+codex-claude-plan --prompt "<prompt>"
 ```
 
    The wrapper resolves the latest installed plugin helper from Codex's plugin
@@ -26,7 +27,7 @@ printf '%s' "<prompt>" | codex-claude-plan
    as a development fallback:
 
 ```bash
-printf '%s' "<prompt>" | node <plugin-root>/scripts/claude-tui-adviser.mjs plan
+node <plugin-root>/scripts/claude-tui-adviser.mjs plan --prompt "<prompt>"
 ```
 
    The helper owns the fragile TUI lifecycle: starting a `tmux` session,

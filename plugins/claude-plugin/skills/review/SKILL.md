@@ -12,12 +12,13 @@ responsible for triage, verification, and deciding whether findings are real.
 
 1. Determine the review scope: uncommitted changes by default, or the branch
    diff/base ref if the user specifies one.
-2. Prefer the installed wrapper command. It reads the prompt from stdin and
+2. Prefer the installed wrapper command. Pass the request directly with
+   `--prompt`, or use `--prompt-file` for larger review prompts. The wrapper
    drives the interactive Claude TUI through a local `tmux` session before
    returning JSON output:
 
 ```bash
-printf '%s' "<prompt>" | codex-claude-review
+codex-claude-review --prompt "<prompt>"
 ```
 
    The wrapper resolves the latest installed plugin helper from Codex's plugin
@@ -26,7 +27,7 @@ printf '%s' "<prompt>" | codex-claude-review
    as a development fallback:
 
 ```bash
-printf '%s' "<prompt>" | node <plugin-root>/scripts/claude-tui-adviser.mjs review
+node <plugin-root>/scripts/claude-tui-adviser.mjs review --prompt "<prompt>"
 ```
 
    The helper owns the fragile TUI lifecycle: starting a `tmux` session,

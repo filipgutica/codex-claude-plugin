@@ -117,13 +117,13 @@ describe('claude tui adviser prompt and args', () => {
     expect(
       buildTmuxPromptSubmissionInvocations({
         bufferName: 'codex-claude-session-prompt',
-        prompt: "plan O'Hara\nwith newline",
+        promptPath: '/tmp/codex-claude-tui/prompt.txt',
         sessionName: 'codex-claude-session',
       }),
     ).toEqual([
       {
         command: 'tmux',
-        args: ['set-buffer', '-b', 'codex-claude-session-prompt', "plan O'Hara\nwith newline"],
+        args: ['load-buffer', '-b', 'codex-claude-session-prompt', '/tmp/codex-claude-tui/prompt.txt'],
       },
       {
         command: 'tmux',
@@ -145,6 +145,26 @@ describe('claude tui adviser prompt and args', () => {
       mode: 'review',
       timeoutMs: 1200,
     })
+  })
+
+  it('parses direct prompt input options for trusted wrapper commands', () => {
+    expect(parseArgs(['review', '--prompt', 'Review this.', '--timeout-ms', '1200'])).toEqual({
+      mode: 'review',
+      prompt: 'Review this.',
+      timeoutMs: 1200,
+    })
+
+    expect(parseArgs(['plan', '--prompt-file', '/tmp/request.txt'])).toEqual({
+      mode: 'plan',
+      promptFile: '/tmp/request.txt',
+      timeoutMs: 300000,
+    })
+  })
+
+  it('rejects conflicting direct prompt input options', () => {
+    expect(() => parseArgs(['review', '--prompt', 'Review this.', '--prompt-file', '/tmp/request.txt'])).toThrow(
+      'Use only one of --prompt or --prompt-file',
+    )
   })
 
   it('rejects --timeout-ms without a value', () => {
