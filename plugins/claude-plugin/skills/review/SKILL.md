@@ -33,8 +33,8 @@ node <plugin-root>/scripts/claude-tui-adviser.mjs review --prompt "<prompt>"
    The helper owns the fragile TUI lifecycle: starting a `tmux` session,
    waiting for Claude `SessionStart` readiness, waiting for the `Stop` hook, and
    extracting the final answer from Claude's persisted transcript. It streams
-   tmux pane snapshots to stderr by default so Codex and the user can see what
-   Claude is doing while stdout remains the final handoff JSON. Run this command
+   bounded tmux pane snapshots to stderr by default so Codex and the user can
+   see what Claude is doing while stdout remains the final handoff JSON. Run this command
    outside Codex's default sandbox. It invokes `tmux` and the local Claude TUI,
    which may need PTY support, Claude auth, keychain/session files, and
    home-directory access that the sandbox can block. In Codex, use the shell

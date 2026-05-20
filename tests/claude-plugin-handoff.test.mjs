@@ -13,6 +13,7 @@ import {
   classifyLaunchFailure,
   isPaneStreamingEnabled,
   paneStreamFingerprint,
+  paneStreamSnapshot,
   parseArgs,
   parseTranscriptAnswer,
   projectDirectoryName,
@@ -208,7 +209,7 @@ describe('claude tui adviser prompt and args', () => {
   it('normalizes pane stream fingerprints to suppress spinner-only updates', () => {
     expect(paneStreamFingerprint([
       'Reading 2 files',
-      'Noodling... (3s · 125 tokens · thinking with high effort)',
+      '✢ Noodling... (3s · 125 tokens · thinking with high effort)',
     ].join('\n'))).toBe([
       'Reading 2 files',
       '<claude-progress>',
@@ -216,7 +217,7 @@ describe('claude tui adviser prompt and args', () => {
 
     expect(paneStreamFingerprint([
       'Reading 2 files',
-      'Noodling... (8s · 1.2k tokens · thinking with high effort)',
+      '✽ Noodling... (8s · 1.2k tokens · thinking with high effort)',
     ].join('\n'))).toBe([
       'Reading 2 files',
       '<claude-progress>',
@@ -224,11 +225,32 @@ describe('claude tui adviser prompt and args', () => {
 
     expect(paneStreamFingerprint([
       'Reading 2 files',
-      'Roosting... (18s · 1.2k tokens · almost done thinking with high effort)',
+      '· Roosting... (18s · 1.2k tokens · almost done thinking with high effort)',
     ].join('\n'))).toBe([
       'Reading 2 files',
       '<claude-progress>',
     ].join('\n'))
+
+    expect(paneStreamFingerprint([
+      'Reading 2 files',
+      '✳ Churning... (1m 3s · ↓ 1.8k tokens · almost done thinking with high effort)',
+    ].join('\n'))).toBe([
+      'Reading 2 files',
+      '<claude-progress>',
+    ].join('\n'))
+
+    expect(paneStreamFingerprint('A path like /tmp/125s/output should remain visible')).toBe(
+      'A path like /tmp/125s/output should remain visible',
+    )
+  })
+
+  it('limits streamed pane snapshots to the recent pane tail', () => {
+    const pane = Array.from({ length: 65 }, (_, index) => `line ${index + 1}`).join('\n')
+    const snapshot = paneStreamSnapshot(pane)
+
+    expect(snapshot.startsWith('line 6\n')).toBe(true)
+    expect(snapshot).toContain('line 65')
+    expect(snapshot).not.toContain('line 5\n')
   })
 })
 
