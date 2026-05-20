@@ -1,3 +1,10 @@
+## [0.12.1](https://github.com/filipgutica/codex-claude-plugin/compare/v0.12.0...v0.12.1) (2026-05-20)
+
+
+### Bug Fixes
+
+* stream Claude pane by default ([fc9d9a0](https://github.com/filipgutica/codex-claude-plugin/commit/fc9d9a0b0b1b81520ca566d773225c93236356b6))
+
 # [0.12.0](https://github.com/filipgutica/codex-claude-plugin/compare/v0.11.0...v0.12.0) (2026-05-20)
 
 
