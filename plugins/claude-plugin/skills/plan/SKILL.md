@@ -12,12 +12,21 @@ final plan, scope control, and deciding what to implement.
 ## Workflow
 
 1. Summarize the user's goal, relevant constraints, and current repo context.
-2. Run the Claude TUI adviser helper from the repository root. The helper reads
-   the prompt from stdin and drives the interactive Claude TUI through a local
-   `tmux` session before returning JSON output:
+2. Prefer the installed wrapper command. It reads the prompt from stdin and
+   drives the interactive Claude TUI through a local `tmux` session before
+   returning JSON output:
 
 ```bash
-printf '%s' "<prompt>" | node plugins/claude-plugin/scripts/claude-tui-adviser.mjs plan
+printf '%s' "<prompt>" | codex-claude-plan
+```
+
+   The wrapper resolves the latest installed plugin helper from Codex's plugin
+   cache. If `codex-claude-plan` is not available, ask the user to run
+   `$claude-plugin:setup`, or use the direct helper script from this plugin root
+   as a development fallback:
+
+```bash
+printf '%s' "<prompt>" | node <plugin-root>/scripts/claude-tui-adviser.mjs plan
 ```
 
    The helper owns the fragile TUI lifecycle: starting a `tmux` session,

@@ -84,6 +84,8 @@ version commands needed.
 
 The `claude-plugin` Codex plugin includes:
 
+- `setup` - installs or uninstalls stable local wrapper commands for no-confirm
+  Claude plan/review runs.
 - `plan` - invokes the local Claude TUI runtime in Claude Plan Mode for an
   ephemeral read-only Claude session and folds the JSON handoff into Codex's own
   plan after validation.
@@ -106,6 +108,38 @@ Runtime requirements:
 - Claude Code CLI available as `claude` on `PATH` and already authenticated
 - `tmux` available on `PATH`
 - Node.js 20.16 or newer
+
+## Trusted Commands
+
+Install-only users can run `$claude-plugin:setup` once to install stable wrapper
+commands into `~/.local/bin`:
+
+```text
+codex-claude-review
+codex-claude-plan
+codex-claude-review-stream
+codex-claude-plan-stream
+```
+
+The setup command uses the installed plugin cache and does not require cloning
+this repository. The wrappers resolve the latest installed plugin helper at
+runtime.
+
+To remove the wrapper commands later, run `$claude-plugin:setup` with the
+uninstall workflow, or run the installed setup script with `--uninstall`.
+
+Add these rules to `~/.codex/rules/default.rules` to let Codex run the wrappers
+without repeatedly asking for confirmation:
+
+```text
+prefix_rule(pattern=["codex-claude-review"], decision="allow")
+prefix_rule(pattern=["codex-claude-plan"], decision="allow")
+prefix_rule(pattern=["codex-claude-review-stream"], decision="allow")
+prefix_rule(pattern=["codex-claude-plan-stream"], decision="allow")
+```
+
+Restart Codex after editing `default.rules` so the new trusted commands are
+loaded. `~/.local/bin` must also be on `PATH`.
 
 ## CI
 

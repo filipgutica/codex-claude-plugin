@@ -14,6 +14,7 @@
       "Interactive"
     ],
     "defaultPrompt": [
+      "Use $claude-plugin:setup to install local wrapper commands for Claude plan/review runs.",
       "Use $claude-plugin:plan to ask Claude CLI for a richer implementation plan.",
       "Use $claude-plugin:review to ask Claude CLI to review the current changes."
     ]

@@ -12,12 +12,21 @@ responsible for triage, verification, and deciding whether findings are real.
 
 1. Determine the review scope: uncommitted changes by default, or the branch
    diff/base ref if the user specifies one.
-2. Run the Claude TUI adviser helper from the repository root. The helper reads
-   the prompt from stdin and drives the interactive Claude TUI through a local
-   `tmux` session before returning JSON output:
+2. Prefer the installed wrapper command. It reads the prompt from stdin and
+   drives the interactive Claude TUI through a local `tmux` session before
+   returning JSON output:
 
 ```bash
-printf '%s' "<prompt>" | node plugins/claude-plugin/scripts/claude-tui-adviser.mjs review
+printf '%s' "<prompt>" | codex-claude-review
+```
+
+   The wrapper resolves the latest installed plugin helper from Codex's plugin
+   cache. If `codex-claude-review` is not available, ask the user to run
+   `$claude-plugin:setup`, or use the direct helper script from this plugin root
+   as a development fallback:
+
+```bash
+printf '%s' "<prompt>" | node <plugin-root>/scripts/claude-tui-adviser.mjs review
 ```
 
    The helper owns the fragile TUI lifecycle: starting a `tmux` session,
