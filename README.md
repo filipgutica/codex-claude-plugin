@@ -125,9 +125,10 @@ The setup command uses the installed plugin cache and does not require cloning
 this repository. The wrappers resolve the latest installed plugin helper at
 runtime. Skills invoke these wrappers directly with `--prompt` or
 `--prompt-file`, so the trusted command is the wrapper itself rather than a
-shell pipeline. The helper streams Claude's tmux pane to stderr by default for
-visibility during long-running reviews and plans; stdout remains the final
-handoff JSON. Set `CODEX_CLAUDE_STREAM_PANE=0` to disable pane streaming.
+shell pipeline. The helper streams bounded Claude tmux pane snapshots to stderr
+by default for visibility during long-running reviews and plans; stdout remains
+the final handoff JSON. Set `CODEX_CLAUDE_STREAM_PANE=0` to disable pane
+streaming.
 
 To remove the wrapper commands later, run `$claude-plugin:setup` with the
 uninstall workflow, or run the installed setup script with `--uninstall`.

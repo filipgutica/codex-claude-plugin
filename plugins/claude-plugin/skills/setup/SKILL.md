@@ -45,8 +45,8 @@ prefix_rule(pattern=["codex-claude-plan-stream"], decision="allow")
 
    The review and plan skills call these wrappers directly with `--prompt` or
    `--prompt-file`, so Codex can match the wrapper command prefix without
-   trusting a shell pipeline. The wrappers stream Claude's tmux pane by default
-   for visibility during long-running plan/review runs; set
+   trusting a shell pipeline. The wrappers stream bounded Claude tmux pane
+   snapshots by default for visibility during long-running plan/review runs; set
    `CODEX_CLAUDE_STREAM_PANE=0` only when the user explicitly wants a quiet run.
 
 5. Remind the user to restart Codex after editing `default.rules`.
