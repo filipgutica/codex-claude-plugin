@@ -12,6 +12,7 @@ import {
   buildTmuxStartInvocation,
   classifyLaunchFailure,
   isPaneStreamingEnabled,
+  paneStreamFingerprint,
   parseArgs,
   parseTranscriptAnswer,
   projectDirectoryName,
@@ -171,17 +172,29 @@ describe('claude tui adviser prompt and args', () => {
     expect(() => parseArgs(['review', '--timeout-ms'])).toThrow('--timeout-ms requires a value')
   })
 
-  it('enables pane streaming only when explicitly requested', () => {
+  it('enables pane streaming by default unless explicitly disabled', () => {
     const originalValue = process.env.CODEX_CLAUDE_STREAM_PANE
 
     try {
       delete process.env.CODEX_CLAUDE_STREAM_PANE
-      expect(isPaneStreamingEnabled()).toBe(false)
+      expect(isPaneStreamingEnabled()).toBe(true)
 
       process.env.CODEX_CLAUDE_STREAM_PANE = '1'
       expect(isPaneStreamingEnabled()).toBe(true)
 
       process.env.CODEX_CLAUDE_STREAM_PANE = 'true'
+      expect(isPaneStreamingEnabled()).toBe(true)
+
+      process.env.CODEX_CLAUDE_STREAM_PANE = '0'
+      expect(isPaneStreamingEnabled()).toBe(false)
+
+      process.env.CODEX_CLAUDE_STREAM_PANE = 'false'
+      expect(isPaneStreamingEnabled()).toBe(false)
+
+      process.env.CODEX_CLAUDE_STREAM_PANE = 'off'
+      expect(isPaneStreamingEnabled()).toBe(false)
+
+      process.env.CODEX_CLAUDE_STREAM_PANE = 'no'
       expect(isPaneStreamingEnabled()).toBe(false)
     } finally {
       if (originalValue === undefined) {
@@ -190,6 +203,32 @@ describe('claude tui adviser prompt and args', () => {
         process.env.CODEX_CLAUDE_STREAM_PANE = originalValue
       }
     }
+  })
+
+  it('normalizes pane stream fingerprints to suppress spinner-only updates', () => {
+    expect(paneStreamFingerprint([
+      'Reading 2 files',
+      'Noodling... (3s · 125 tokens · thinking with high effort)',
+    ].join('\n'))).toBe([
+      'Reading 2 files',
+      '<claude-progress>',
+    ].join('\n'))
+
+    expect(paneStreamFingerprint([
+      'Reading 2 files',
+      'Noodling... (8s · 1.2k tokens · thinking with high effort)',
+    ].join('\n'))).toBe([
+      'Reading 2 files',
+      '<claude-progress>',
+    ].join('\n'))
+
+    expect(paneStreamFingerprint([
+      'Reading 2 files',
+      'Roosting... (18s · 1.2k tokens · almost done thinking with high effort)',
+    ].join('\n'))).toBe([
+      'Reading 2 files',
+      '<claude-progress>',
+    ].join('\n'))
   })
 })
 

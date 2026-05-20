@@ -41,7 +41,9 @@ const REVIEW_MODEL = 'sonnet'
 const DEFAULT_TIMEOUT_MS = 300000
 const HOOK_POLL_MS = 250
 const PANE_STREAM_POLL_MS = 1000
+const PANE_STREAM_HEARTBEAT_MS = 15000
 const STREAM_PANE_ENV = 'CODEX_CLAUDE_STREAM_PANE'
+const PANE_PROGRESS_TOKENS = ['Noodling', 'Roosting', 'thinking with', 'almost done']
 
 // CLI parsing and prompt construction
 
@@ -87,7 +89,10 @@ const waitUntil = async <T,>({ deadlineMs, getValue, timeoutMessage }: {
   throw new Error(timeoutMessage)
 }
 
-export const isPaneStreamingEnabled = () => process.env[STREAM_PANE_ENV] === '1'
+export const isPaneStreamingEnabled = () => {
+  const value = process.env[STREAM_PANE_ENV]?.toLowerCase()
+  return value === undefined || !['0', 'false', 'off', 'no'].includes(value)
+}
 
 const remainingTimeoutMs = (deadlineMs: number) => {
   const remaining = deadlineMs - Date.now()
@@ -606,11 +611,16 @@ const createPaneStreamer = ({ sessionName }: {
 }) => {
   if (!isPaneStreamingEnabled()) return { stop: () => undefined }
 
-  let lastPane = ''
+  let lastFingerprint = ''
+  let lastStreamedAt = 0
   const streamPane = async () => {
     const pane = await captureTmuxPane(sessionName)
-    if (pane === null || pane === lastPane) return
-    lastPane = pane
+    if (pane === null) return
+    const fingerprint = paneStreamFingerprint(pane)
+    const now = Date.now()
+    if (fingerprint === lastFingerprint && now - lastStreamedAt < PANE_STREAM_HEARTBEAT_MS) return
+    lastFingerprint = fingerprint
+    lastStreamedAt = now
     process.stderr.write(`\n[${sessionName} pane]\n${pane}\n`)
   }
   const interval = setInterval(() => {
@@ -621,6 +631,23 @@ const createPaneStreamer = ({ sessionName }: {
   return {
     stop: () => clearInterval(interval),
   }
+}
+
+export const paneStreamFingerprint = (pane: string) => pane
+  .split('\n')
+  .map(normalizePaneLineForStreaming)
+  .filter((line) => line.trim() !== '')
+  .join('\n')
+  .trim()
+
+const normalizePaneLineForStreaming = (line: string) => {
+  if (PANE_PROGRESS_TOKENS.some((token) => line.includes(token))) {
+    return '<claude-progress>'
+  }
+
+  return line
+    .replace(/\d+(?:\.\d+)?k tokens|\d+ tokens/g, '<tokens>')
+    .replace(/\d+m\s+\d+s|\d+s/g, '<elapsed>')
 }
 
 const killTmuxSession = async (sessionName: string) => {
