@@ -84,11 +84,15 @@ version commands needed.
 
 The `claude-plugin` Codex plugin includes:
 
-- `plan` - invokes the local Claude TUI runtime for an ephemeral read-only
-  Claude session and folds the JSON handoff into Codex's own plan after
-  validation.
+- `setup` - installs or uninstalls stable local wrapper commands for no-confirm
+  Claude plan/review runs.
+- `plan` - invokes the local Claude TUI runtime in Claude Plan Mode for an
+  ephemeral read-only Claude session and folds the JSON handoff into Codex's own
+  plan after validation.
 - `review` - uses the same local TUI runtime for advisory code review, then has
-  Codex validate and separate confirmed, rejected, and actionable findings.
+  Codex validate and separate confirmed, rejected, and actionable findings. The
+  review runtime pins Claude Code to `--model sonnet` and read-only tools
+  instead of Claude Plan Mode.
 
 The Claude adviser helper intentionally avoids `claude -p` and external PTY
 wrappers. It runs the authenticated local Claude CLI in interactive mode inside
@@ -104,6 +108,40 @@ Runtime requirements:
 - Claude Code CLI available as `claude` on `PATH` and already authenticated
 - `tmux` available on `PATH`
 - Node.js 20.16 or newer
+
+## Trusted Commands
+
+Install-only users can run `$claude-plugin:setup` once to install stable wrapper
+commands into `~/.local/bin`:
+
+```text
+codex-claude-review
+codex-claude-plan
+codex-claude-review-stream
+codex-claude-plan-stream
+```
+
+The setup command uses the installed plugin cache and does not require cloning
+this repository. The wrappers resolve the latest installed plugin helper at
+runtime. Skills invoke these wrappers directly with `--prompt` or
+`--prompt-file`, so the trusted command is the wrapper itself rather than a
+shell pipeline.
+
+To remove the wrapper commands later, run `$claude-plugin:setup` with the
+uninstall workflow, or run the installed setup script with `--uninstall`.
+
+Add these rules to `~/.codex/rules/default.rules` to let Codex run the wrappers
+without repeatedly asking for confirmation:
+
+```text
+prefix_rule(pattern=["codex-claude-review"], decision="allow")
+prefix_rule(pattern=["codex-claude-plan"], decision="allow")
+prefix_rule(pattern=["codex-claude-review-stream"], decision="allow")
+prefix_rule(pattern=["codex-claude-plan-stream"], decision="allow")
+```
+
+Restart Codex after editing `default.rules` so the new trusted commands are
+loaded. `~/.local/bin` must also be on `PATH`.
 
 ## CI
 
