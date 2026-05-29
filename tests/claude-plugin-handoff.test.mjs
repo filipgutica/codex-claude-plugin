@@ -11,6 +11,7 @@ import {
   buildTmuxPromptSubmissionInvocations,
   buildTmuxStartInvocation,
   classifyLaunchFailure,
+  extractCodexQuestion,
   isPaneStreamingEnabled,
   paneStreamFingerprint,
   paneStreamSnapshot,
@@ -31,6 +32,7 @@ describe('claude tui adviser prompt and args', () => {
     expect(prompt).toContain('advising Codex on a plan')
     expect(prompt).toContain('Codex remains responsible')
     expect(prompt).toContain('Do not edit files')
+    expect(prompt).toContain('QUESTION_FOR_CODEX:')
     expect(prompt).toContain('Add the local Claude TUI handoff flow.')
   })
 
@@ -43,6 +45,7 @@ describe('claude tui adviser prompt and args', () => {
 
     expect(prompt).toContain('advising Codex on a review')
     expect(prompt).toContain('confirmed bugs, regressions, missing tests, or contract drift')
+    expect(prompt).toContain('QUESTION_FOR_CODEX:')
     expect(prompt).toContain('Review current changes.')
   })
 
@@ -144,19 +147,37 @@ describe('claude tui adviser prompt and args', () => {
 
   it('parses CLI mode and timeout', () => {
     expect(parseArgs(['review', '--timeout-ms', '1200'])).toEqual({
+      idleTimeoutMs: 120000,
       mode: 'review',
       timeoutMs: 1200,
+    })
+
+    expect(parseArgs(['review', '--idle-timeout-ms', '5000', '--hard-timeout-ms', '60000'])).toEqual({
+      hardTimeoutMs: 60000,
+      idleTimeoutMs: 5000,
+      mode: 'review',
+      timeoutMs: 300000,
+    })
+
+    expect(parseArgs(['plan', '--resume', '/tmp/session.json', '--answer', 'Use the smaller scope.'])).toEqual({
+      answer: 'Use the smaller scope.',
+      idleTimeoutMs: 120000,
+      mode: 'plan',
+      resumeFile: '/tmp/session.json',
+      timeoutMs: 300000,
     })
   })
 
   it('parses direct prompt input options for trusted wrapper commands', () => {
     expect(parseArgs(['review', '--prompt', 'Review this.', '--timeout-ms', '1200'])).toEqual({
+      idleTimeoutMs: 120000,
       mode: 'review',
       prompt: 'Review this.',
       timeoutMs: 1200,
     })
 
     expect(parseArgs(['plan', '--prompt-file', '/tmp/request.txt'])).toEqual({
+      idleTimeoutMs: 120000,
       mode: 'plan',
       promptFile: '/tmp/request.txt',
       timeoutMs: 300000,
@@ -166,6 +187,14 @@ describe('claude tui adviser prompt and args', () => {
   it('rejects conflicting direct prompt input options', () => {
     expect(() => parseArgs(['review', '--prompt', 'Review this.', '--prompt-file', '/tmp/request.txt'])).toThrow(
       'Use only one of --prompt or --prompt-file',
+    )
+
+    expect(() => parseArgs(['review', '--resume', '/tmp/session.json', '--prompt', 'Review this.'])).toThrow(
+      'Use --resume with --answer or --answer-file, not --prompt or --prompt-file',
+    )
+
+    expect(() => parseArgs(['review', '--answer', 'Use the narrow fix.'])).toThrow(
+      'Use --answer or --answer-file only with --resume',
     )
   })
 
@@ -344,6 +373,16 @@ describe('Claude transcript parsing and failures', () => {
     expect(parseTranscriptAnswer(raw)).toBe('newer')
   })
 
+  it('extracts a structured Codex clarification question from assistant text', () => {
+    expect(extractCodexQuestion('QUESTION_FOR_CODEX: Which base branch should I use?')).toBe(
+      'Which base branch should I use?',
+    )
+    expect(extractCodexQuestion('Progress notes\nQUESTION_FOR_CODEX: Should I include docs?\n')).toBe(
+      'Should I include docs?',
+    )
+    expect(extractCodexQuestion('Should I include docs?')).toBeNull()
+  })
+
   it('builds a local runtime handoff', () => {
     expect(
       buildHandoff({
@@ -355,6 +394,7 @@ describe('Claude transcript parsing and failures', () => {
     ).toMatchObject({
       ok: true,
       source: 'claude-tui',
+      status: 'complete',
       mode: 'plan',
       sessionId: 'session-1',
       cwd: '/repo',
@@ -387,6 +427,12 @@ describe('Claude transcript parsing and failures', () => {
       'Claude TUI adviser timed out before producing a handoff.',
     )
     expect(classifyLaunchFailure(new Error('Claude TUI adviser timed out waiting for Stop.'))).toBe(
+      'Claude TUI adviser timed out before producing a handoff.',
+    )
+    expect(classifyLaunchFailure(new Error('Claude TUI adviser was idle for 120000ms before producing a handoff.'))).toBe(
+      'Claude TUI adviser timed out before producing a handoff.',
+    )
+    expect(classifyLaunchFailure(new Error('Claude TUI adviser Claude process exited before producing a handoff.'))).toBe(
       'Claude TUI adviser timed out before producing a handoff.',
     )
   })
