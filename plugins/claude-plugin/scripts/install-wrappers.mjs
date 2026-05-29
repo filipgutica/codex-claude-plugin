@@ -8,10 +8,12 @@ import { delimiter, join, resolve } from 'node:path'
 const DEFAULT_BIN_DIR = join(homedir(), '.local', 'bin')
 const BIN_DIR = resolve(process.env.CODEX_CLAUDE_BIN_DIR || DEFAULT_BIN_DIR)
 const WRAPPERS = [
-  { command: 'codex-claude-review', mode: 'review', stream: false },
-  { command: 'codex-claude-plan', mode: 'plan', stream: false },
-  { command: 'codex-claude-review-stream', mode: 'review', stream: true },
-  { command: 'codex-claude-plan-stream', mode: 'plan', stream: true },
+  { command: 'codex-claude-review', mode: 'review' },
+  { command: 'codex-claude-plan', mode: 'plan' },
+]
+const LEGACY_WRAPPERS = [
+  'codex-claude-review-stream',
+  'codex-claude-plan-stream',
 ]
 
 const usage = [
@@ -36,7 +38,7 @@ const parseOption = (option) => {
   throw new Error(usage)
 }
 
-const wrapperSource = ({ mode, stream }) => `#!/usr/bin/env node
+const wrapperSource = ({ mode }) => `#!/usr/bin/env node
 import { spawn } from 'node:child_process'
 import { accessSync, readdirSync } from 'node:fs'
 import { constants } from 'node:fs'
@@ -44,7 +46,6 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 const MODE = ${JSON.stringify(mode)}
-const STREAM = ${JSON.stringify(stream)}
 
 const compareVersions = (left, right) => left.localeCompare(right, undefined, {
   numeric: true,
@@ -94,7 +95,7 @@ try {
 }
 
 const child = spawn(process.execPath, [helperPath, MODE, ...process.argv.slice(2)], {
-  env: STREAM ? { ...process.env, CODEX_CLAUDE_STREAM_PANE: '1' } : process.env,
+  env: process.env,
   stdio: 'inherit',
 })
 
@@ -125,6 +126,7 @@ const installWrappers = async () => {
     await chmod(targetPath, 0o755)
     console.log(`Installed ${targetPath}`)
   }
+  await removeLegacyWrappers()
 
   if (!isOnPath(BIN_DIR)) {
     console.error(`Warning: ${BIN_DIR} is not on PATH. Add it before using the wrapper commands.`)
@@ -136,6 +138,15 @@ const uninstallWrappers = async () => {
     const targetPath = join(BIN_DIR, command)
     await rm(targetPath, { force: true })
     console.log(`Removed ${targetPath}`)
+  }
+  await removeLegacyWrappers()
+}
+
+const removeLegacyWrappers = async () => {
+  for (const command of LEGACY_WRAPPERS) {
+    const targetPath = join(BIN_DIR, command)
+    await rm(targetPath, { force: true })
+    console.log(`Removed legacy ${targetPath}`)
   }
 }
 
