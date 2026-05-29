@@ -39,8 +39,6 @@ when the user asks for a different directory.
 ```text
 prefix_rule(pattern=["codex-claude-review"], decision="allow")
 prefix_rule(pattern=["codex-claude-plan"], decision="allow")
-prefix_rule(pattern=["codex-claude-review-stream"], decision="allow")
-prefix_rule(pattern=["codex-claude-plan-stream"], decision="allow")
 ```
 
    The review and plan skills call these wrappers directly with `--prompt` or
@@ -48,6 +46,9 @@ prefix_rule(pattern=["codex-claude-plan-stream"], decision="allow")
    trusting a shell pipeline. The wrappers stream bounded Claude tmux pane
    snapshots by default for visibility during long-running plan/review runs; set
    `CODEX_CLAUDE_STREAM_PANE=0` only when the user explicitly wants a quiet run.
+   Setup removes obsolete `codex-claude-review-stream` and
+   `codex-claude-plan-stream` wrappers if they were installed by an older
+   plugin version.
    If Claude asks a blocking clarification question, Codex can resume the same
    tmux session through the same wrapper with `--resume <statePath> --answer
    <text>`.

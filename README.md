@@ -126,8 +126,6 @@ commands into `~/.local/bin`:
 ```text
 codex-claude-review
 codex-claude-plan
-codex-claude-review-stream
-codex-claude-plan-stream
 ```
 
 The setup command uses the installed plugin cache and does not require cloning
@@ -163,8 +161,6 @@ without repeatedly asking for confirmation:
 ```text
 prefix_rule(pattern=["codex-claude-review"], decision="allow")
 prefix_rule(pattern=["codex-claude-plan"], decision="allow")
-prefix_rule(pattern=["codex-claude-review-stream"], decision="allow")
-prefix_rule(pattern=["codex-claude-plan-stream"], decision="allow")
 ```
 
 Restart Codex after editing `default.rules` so the new trusted commands are
