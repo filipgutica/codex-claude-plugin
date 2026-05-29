@@ -1,3 +1,15 @@
+# [0.13.0](https://github.com/filipgutica/codex-claude-plugin/compare/v0.12.1...v0.13.0) (2026-05-29)
+
+
+### Bug Fixes
+
+* bound Claude pane stream output ([493197a](https://github.com/filipgutica/codex-claude-plugin/commit/493197a8059ae04b030c11df340e089ab95d7e5b))
+
+
+### Features
+
+* make Claude adviser sessions interactive ([d5b2e2e](https://github.com/filipgutica/codex-claude-plugin/commit/d5b2e2e293d5d4478819f127f0d2777689d48676))
+
 ## [0.12.1](https://github.com/filipgutica/codex-claude-plugin/compare/v0.12.0...v0.12.1) (2026-05-20)
 
 
