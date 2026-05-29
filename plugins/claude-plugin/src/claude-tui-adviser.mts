@@ -2,7 +2,7 @@
 // fallow-ignore-file code-duplication
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -15,6 +15,7 @@ type RuntimeFiles = {
   hookPath: string
   promptPath: string
   settingsPath: string
+  statePath: string
   runtimeDir: string
 }
 
@@ -25,9 +26,14 @@ type CommandResult = {
 
 type ParsedArgs = {
   mode: Mode
+  answer?: string
+  answerFile?: string
   prompt?: string
   promptFile?: string
+  resumeFile?: string
   timeoutMs: number
+  idleTimeoutMs: number
+  hardTimeoutMs?: number
 }
 
 type HookEvent = {
@@ -36,14 +42,40 @@ type HookEvent = {
   transcriptPath?: unknown
 }
 
+type AdviserSessionState = {
+  schemaVersion: 1
+  cwd: string
+  mode: Mode
+  sessionId: string
+  sessionName: string
+  runtimeFiles: RuntimeFiles
+  lastQuestion?: string
+  createdAt: string
+}
+
+type StopOrQuestion =
+  | { kind: 'stop', stopEvent: HookEvent }
+  | { kind: 'question', question: string }
+
+type StopOrQuestionState = {
+  seenEventCount: number
+  lastQuestion: string
+}
+
 const READ_ONLY_TOOLS = 'Read,Glob,Grep,LS'
 const REVIEW_MODEL = 'sonnet'
 const DEFAULT_TIMEOUT_MS = 300000
+const DEFAULT_IDLE_TIMEOUT_MS = 120000
+const DEFAULT_COMMAND_TIMEOUT_MS = 30000
 const HOOK_POLL_MS = 250
 const PANE_STREAM_POLL_MS = 1000
 const PANE_STREAM_HEARTBEAT_MS = 30000
 const PANE_STREAM_MAX_LINES = 60
 const STREAM_PANE_ENV = 'CODEX_CLAUDE_STREAM_PANE'
+const IDLE_TIMEOUT_ENV = 'CODEX_CLAUDE_IDLE_TIMEOUT_MS'
+const HARD_TIMEOUT_ENV = 'CODEX_CLAUDE_HARD_TIMEOUT_MS'
+const CLAUDE_HOME_ENV = 'CODEX_CLAUDE_HOME'
+const QUESTION_PREFIX = 'QUESTION_FOR_CODEX:'
 const CLAUDE_PROGRESS_LINE_PATTERN = /^\s*[✻✢✳✽✶·]\s+.{1,80}(?:…|\.{3})(?:\s+\([^)]*\))?\s*$/u
 
 // CLI parsing and prompt construction
@@ -58,8 +90,16 @@ const readInput = async ({ prompt, promptFile }: {
   prompt?: string
   promptFile?: string
 }) => {
-  assertSinglePromptInput({ prompt, promptFile })
+  assertSingleTextInput({ left: prompt, leftLabel: '--prompt', right: promptFile, rightLabel: '--prompt-file' })
   return await readProvidedPrompt({ prompt, promptFile }) ?? await readStdin()
+}
+
+const readAnswer = async ({ answer, answerFile }: {
+  answer?: string
+  answerFile?: string
+}) => {
+  assertSingleTextInput({ left: answer, leftLabel: '--answer', right: answerFile, rightLabel: '--answer-file' })
+  return await readProvidedPrompt({ prompt: answer, promptFile: answerFile }) ?? await readStdin()
 }
 
 const readProvidedPrompt = async ({ prompt, promptFile }: {
@@ -74,20 +114,27 @@ const readProvidedPrompt = async ({ prompt, promptFile }: {
 const firstString = (...values: unknown[]) =>
   values.find((value): value is string => typeof value === 'string' && value.trim() !== '') || null
 
+const claudeHomePath = () => process.env[CLAUDE_HOME_ENV] || join(homedir(), '.claude')
+
 const sleep = (ms: number) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms))
 
-const waitUntil = async <T,>({ deadlineMs, getValue, timeoutMessage }: {
-  deadlineMs: number
+type SessionWatchdog = {
+  markActivity: () => void
+  commandTimeoutMs: () => number
+  check: () => Promise<void>
+  pollDelayMs: () => number
+}
+
+const waitUntil = async <T,>({ getValue, watchdog }: {
   getValue: () => Promise<T | null>
-  timeoutMessage: string
+  watchdog: SessionWatchdog
 }) => {
-  while (Date.now() < deadlineMs) {
+  while (true) {
     const value = await getValue()
     if (value !== null) return value
-    await sleep(Math.min(HOOK_POLL_MS, Math.max(1, deadlineMs - Date.now())))
+    await watchdog.check()
+    await sleep(watchdog.pollDelayMs())
   }
-
-  throw new Error(timeoutMessage)
 }
 
 export const isPaneStreamingEnabled = () => {
@@ -95,10 +142,11 @@ export const isPaneStreamingEnabled = () => {
   return value === undefined || !['0', 'false', 'off', 'no'].includes(value)
 }
 
-const remainingTimeoutMs = (deadlineMs: number) => {
-  const remaining = deadlineMs - Date.now()
-  if (remaining <= 0) throw new Error('Claude TUI adviser timed out before producing a handoff.')
-  return remaining
+const commandTimeoutMs = (hardTimeoutAtMs?: number) => {
+  if (hardTimeoutAtMs === undefined) return DEFAULT_COMMAND_TIMEOUT_MS
+  const remaining = hardTimeoutAtMs - Date.now()
+  if (remaining <= 0) throw new Error('Claude TUI adviser reached the configured hard timeout before producing a handoff.')
+  return Math.min(DEFAULT_COMMAND_TIMEOUT_MS, remaining)
 }
 
 export const buildClaudePrompt = ({ mode, input, cwd = process.cwd() }: {
@@ -128,6 +176,9 @@ export const buildClaudePrompt = ({ mode, input, cwd = process.cwd() }: {
     '',
     'Codex remains responsible for validating your answer before presenting or acting on it.',
     'Inspect the repository as needed using read-only tools. Do not edit files.',
+    'Work interactively with Codex. If you are blocked by missing requirements, ask exactly one clarification question.',
+    `Start that question with ${QUESTION_PREFIX} and then wait for Codex to answer before continuing.`,
+    'Do not use that prefix in your final answer.',
     '',
     `Repository: ${cwd}`,
     '',
@@ -141,7 +192,7 @@ export const buildClaudePrompt = ({ mode, input, cwd = process.cwd() }: {
 export const parseArgs = (argv: string[]) => {
   const [mode, ...args] = argv
   if (!isMode(mode)) {
-    throw new Error('Usage: claude-tui-adviser.mjs <plan|review> [--timeout-ms <milliseconds>] [--prompt <text> | --prompt-file <path>]')
+    throw new Error('Usage: claude-tui-adviser.mjs <plan|review> [--timeout-ms <milliseconds>] [--idle-timeout-ms <milliseconds>] [--hard-timeout-ms <milliseconds>] [--prompt <text> | --prompt-file <path> | --resume <state-path> (--answer <text> | --answer-file <path>)]')
   }
 
   return { mode, ...parseOptions(args) }
@@ -150,7 +201,12 @@ export const parseArgs = (argv: string[]) => {
 const isMode = (value: unknown): value is Mode => value === 'plan' || value === 'review'
 
 const parseOptions = (args: string[]): Omit<ParsedArgs, 'mode'> => {
-  const parsed: Omit<ParsedArgs, 'mode'> = { timeoutMs: DEFAULT_TIMEOUT_MS }
+  const hardTimeoutMs = parseOptionalTimeoutMs(process.env[HARD_TIMEOUT_ENV], HARD_TIMEOUT_ENV)
+  const parsed: Omit<ParsedArgs, 'mode'> = {
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    idleTimeoutMs: parseOptionalTimeoutMs(process.env[IDLE_TIMEOUT_ENV], IDLE_TIMEOUT_ENV) ?? DEFAULT_IDLE_TIMEOUT_MS,
+  }
+  if (hardTimeoutMs !== null) parsed.hardTimeoutMs = hardTimeoutMs
 
   for (let index = 0; index < args.length; index += 1) {
     const option = args[index]
@@ -159,7 +215,7 @@ const parseOptions = (args: string[]): Omit<ParsedArgs, 'mode'> => {
     index += 1
   }
 
-  assertSinglePromptInput(parsed)
+  assertInputMode(parsed)
 
   return parsed
 }
@@ -181,7 +237,22 @@ const applyOption = ({ parsed, option, value }: {
 }) => {
   const optionHandlers: Record<string, () => void> = {
     '--timeout-ms': () => {
-      parsed.timeoutMs = parseTimeoutMs(value)
+      parsed.timeoutMs = parseTimeoutMs(value, '--timeout-ms')
+    },
+    '--idle-timeout-ms': () => {
+      parsed.idleTimeoutMs = parseTimeoutMs(value, '--idle-timeout-ms')
+    },
+    '--hard-timeout-ms': () => {
+      parsed.hardTimeoutMs = parseTimeoutMs(value, '--hard-timeout-ms')
+    },
+    '--resume': () => {
+      parsed.resumeFile = value
+    },
+    '--answer': () => {
+      parsed.answer = value
+    },
+    '--answer-file': () => {
+      parsed.answerFile = value
     },
     '--prompt': () => {
       parsed.prompt = value
@@ -195,17 +266,43 @@ const applyOption = ({ parsed, option, value }: {
   handler()
 }
 
-const assertSinglePromptInput = ({ prompt, promptFile }: Pick<ParsedArgs, 'prompt' | 'promptFile'>) => {
-  if (prompt !== undefined && promptFile !== undefined) {
-    throw new Error('Use only one of --prompt or --prompt-file.')
+const assertInputMode = (options: Omit<ParsedArgs, 'mode' | 'timeoutMs' | 'idleTimeoutMs' | 'hardTimeoutMs'>) => {
+  const { answer, answerFile, prompt, promptFile } = options
+  assertSingleTextInput({ left: prompt, leftLabel: '--prompt', right: promptFile, rightLabel: '--prompt-file' })
+  assertSingleTextInput({ left: answer, leftLabel: '--answer', right: answerFile, rightLabel: '--answer-file' })
+  assertAnswerRequiresResume(options)
+  assertResumeExcludesPrompt(options)
+}
+
+const assertAnswerRequiresResume = ({ answer, answerFile, resumeFile }: Pick<ParsedArgs, 'answer' | 'answerFile' | 'resumeFile'>) => {
+  if (resumeFile === undefined && (answer !== undefined || answerFile !== undefined)) {
+    throw new Error('Use --answer or --answer-file only with --resume.')
   }
 }
 
-const parseTimeoutMs = (rawValue: string) => {
+const assertResumeExcludesPrompt = ({ prompt, promptFile, resumeFile }: Pick<ParsedArgs, 'prompt' | 'promptFile' | 'resumeFile'>) => {
+  if (resumeFile !== undefined && (prompt !== undefined || promptFile !== undefined)) {
+    throw new Error('Use --resume with --answer or --answer-file, not --prompt or --prompt-file.')
+  }
+}
+
+const assertSingleTextInput = ({ left, leftLabel, right, rightLabel }: {
+  left?: string
+  leftLabel: string
+  right?: string
+  rightLabel: string
+}) => {
+  if (left !== undefined && right !== undefined) throw new Error(`Use only one of ${leftLabel} or ${rightLabel}.`)
+}
+
+const parseTimeoutMs = (rawValue: string, label: string) => {
   const value = Number(rawValue)
-  if (!Number.isFinite(value) || value <= 0) throw new Error('--timeout-ms must be a positive number.')
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${label} must be a positive number.`)
   return value
 }
+
+const parseOptionalTimeoutMs = (rawValue: string | undefined, label: string) =>
+  rawValue === undefined || rawValue.trim() === '' ? null : parseTimeoutMs(rawValue, label)
 
 // Command execution and tmux command builders
 
@@ -340,6 +437,7 @@ const createRuntimeFiles = async (): Promise<RuntimeFiles> => {
   const hookPath = join(runtimeDir, 'hook.mjs')
   const promptPath = join(runtimeDir, 'prompt.txt')
   const settingsPath = join(runtimeDir, 'settings.json')
+  const statePath = join(runtimeDir, 'session.json')
 
   await writeFile(hookPath, [
     "import { appendFileSync } from 'node:fs'",
@@ -375,7 +473,7 @@ const createRuntimeFiles = async (): Promise<RuntimeFiles> => {
   }
   await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`)
 
-  return { eventLogPath, hookPath, promptPath, settingsPath, runtimeDir }
+  return { eventLogPath, hookPath, promptPath, settingsPath, statePath, runtimeDir }
 }
 
 // Hook waiting and transcript reading
@@ -396,18 +494,77 @@ const readHookEvents = async (eventLogPath: string) => {
   }
 }
 
-const waitForHookEvent = async ({ deadlineMs, event, eventLogPath }: {
-  deadlineMs: number
+const waitForHookEvent = async ({ event, eventLogPath, watchdog }: {
   event: 'SessionStart' | 'Stop'
   eventLogPath: string
-}) => waitUntil({
-  deadlineMs,
-  timeoutMessage: `Claude TUI adviser timed out waiting for ${event}.`,
-  getValue: async () => {
-    const events = await readHookEvents(eventLogPath)
-    return events.find((entry) => entry.event === event) || null
-  },
-})
+  watchdog: SessionWatchdog
+}) => {
+  let seenEventCount = 0
+  return waitUntil({
+    watchdog,
+    getValue: async () => {
+      const events = await readHookEvents(eventLogPath)
+      if (events.length > seenEventCount) {
+        seenEventCount = events.length
+        watchdog.markActivity()
+      }
+      return events.find((entry) => entry.event === event) || null
+    },
+  })
+}
+
+const waitForStopOrQuestion = async ({ cwd, eventLogPath, ignoredQuestion = '', sessionId, watchdog }: {
+  cwd: string
+  eventLogPath: string
+  ignoredQuestion?: string
+  sessionId: string
+  watchdog: SessionWatchdog
+}): Promise<StopOrQuestion> => {
+  const state = { seenEventCount: 0, lastQuestion: ignoredQuestion }
+  return waitUntil({
+    watchdog,
+    getValue: () => readStopOrQuestion({ cwd, eventLogPath, onActivity: watchdog.markActivity, sessionId, state }),
+  })
+}
+
+const readStopOrQuestion = async ({ cwd, eventLogPath, onActivity, sessionId, state }: {
+  cwd: string
+  eventLogPath: string
+  onActivity: () => void
+  sessionId: string
+  state: StopOrQuestionState
+}): Promise<StopOrQuestion | null> => {
+  const events = await readHookEvents(eventLogPath)
+  recordHookActivity({ eventCount: events.length, onActivity, state })
+
+  const stopEvent = events.find((entry) => entry.event === 'Stop')
+  if (stopEvent !== undefined) return { kind: 'stop', stopEvent }
+
+  return readNewQuestion({ cwd, onActivity, sessionId, state })
+}
+
+const recordHookActivity = ({ eventCount, onActivity, state }: {
+  eventCount: number
+  onActivity: () => void
+  state: StopOrQuestionState
+}) => {
+  if (eventCount <= state.seenEventCount) return
+  state.seenEventCount = eventCount
+  onActivity()
+}
+
+const readNewQuestion = async ({ cwd, onActivity, sessionId, state }: {
+  cwd: string
+  onActivity: () => void
+  sessionId: string
+  state: StopOrQuestionState
+}): Promise<StopOrQuestion | null> => {
+  const question = await readTranscriptQuestionIfAvailable({ cwd, sessionId })
+  if (question === null || question === state.lastQuestion) return null
+  state.lastQuestion = question
+  onActivity()
+  return { kind: 'question', question }
+}
 
 const isNodeError = (error: unknown): error is NodeJS.ErrnoException =>
   error instanceof Error && 'code' in error
@@ -514,8 +671,15 @@ export const parseTranscriptAnswer = (raw: string) => {
   return null
 }
 
+export const extractCodexQuestion = (text: string) => {
+  const prefixIndex = text.lastIndexOf(QUESTION_PREFIX)
+  if (prefixIndex === -1) return null
+  const question = text.slice(prefixIndex + QUESTION_PREFIX.length).trim()
+  return question === '' ? null : question
+}
+
 export const resolveClaudeTranscriptPath = async ({
-  claudeHome = join(homedir(), '.claude'),
+  claudeHome = claudeHomePath(),
   cwd,
   sessionId,
   stopEvent,
@@ -526,20 +690,49 @@ export const resolveClaudeTranscriptPath = async ({
   stopEvent: HookEvent
 }) => firstExistingPath(transcriptCandidatePaths({ claudeHome, cwd, sessionId, stopEvent }))
 
-const waitForTranscriptAnswer = async ({ cwd, deadlineMs, sessionId, stopEvent }: {
+const waitForTranscriptAnswer = async ({ cwd, sessionId, stopEvent, watchdog }: {
   cwd: string
-  deadlineMs: number
   sessionId: string
   stopEvent: HookEvent
-}) => waitUntil({
-  deadlineMs,
-  timeoutMessage: 'Claude TUI adviser could not find a final assistant answer in the Claude transcript.',
-  getValue: async () => {
-    const transcriptPath = await resolveClaudeTranscriptPath({ cwd, sessionId, stopEvent })
-    if (transcriptPath === null) return null
-    return parseTranscriptAnswer(await readFile(transcriptPath, 'utf8'))
-  },
-})
+  watchdog: SessionWatchdog
+}) => {
+  let lastTranscriptSignature = ''
+  return waitUntil({
+    watchdog,
+    getValue: async () => {
+      const result = await readTranscriptAnswerIfAvailable({ cwd, sessionId, stopEvent })
+      if (result === null) return null
+      if (result.signature !== lastTranscriptSignature) {
+        lastTranscriptSignature = result.signature
+        watchdog.markActivity()
+      }
+      return result.answer
+    },
+  })
+}
+
+const readTranscriptAnswerIfAvailable = async ({ cwd, sessionId, stopEvent }: {
+  cwd: string
+  sessionId: string
+  stopEvent: HookEvent
+}) => {
+  const transcriptPath = await resolveClaudeTranscriptPath({ cwd, sessionId, stopEvent })
+  if (transcriptPath === null) return null
+  const signature = await fileActivitySignature(transcriptPath)
+  if (signature === null) return null
+  const answer = parseTranscriptAnswer(await readFile(transcriptPath, 'utf8'))
+  return answer === null ? null : { answer, signature }
+}
+
+const readTranscriptQuestionIfAvailable = async ({ cwd, sessionId }: {
+  cwd: string
+  sessionId: string
+}) => {
+  const transcriptPath = await resolveClaudeTranscriptPath({ cwd, sessionId, stopEvent: { event: 'Stop' } })
+  if (transcriptPath === null) return null
+  const answer = parseTranscriptAnswer(await readFile(transcriptPath, 'utf8'))
+  return answer === null ? null : extractCodexQuestion(answer)
+}
 
 // Session orchestration
 
@@ -551,6 +744,7 @@ export const buildHandoff = ({ answer, cwd, mode, sessionId }: {
 }) => ({
   ok: true,
   schemaVersion: 1,
+  status: 'complete',
   mode,
   sessionId,
   cwd,
@@ -559,24 +753,85 @@ export const buildHandoff = ({ answer, cwd, mode, sessionId }: {
   answer,
 })
 
-export const runAdviser = async ({ mode, input, timeoutMs, cwd = process.cwd() }: {
+const buildQuestionHandoff = ({ cwd, mode, question, sessionId, sessionName, statePath }: {
+  cwd: string
+  mode: Mode
+  question: string
+  sessionId: string
+  sessionName: string
+  statePath: string
+}) => ({
+  ok: true,
+  schemaVersion: 1,
+  status: 'needs_input',
+  mode,
+  sessionId,
+  cwd,
+  createdAt: new Date().toISOString(),
+  source: 'claude-tui',
+  question,
+  tmuxSession: sessionName,
+  statePath,
+  attachCommand: `tmux attach -t ${shellQuote(sessionName)}`,
+  resumeCommand: `codex-claude-${mode} --resume ${shellQuote(statePath)} --answer ${shellQuote('<answer>')}`,
+})
+
+const sessionState = ({ cwd, mode, question, runtimeFiles, sessionId, sessionName }: {
+  cwd: string
+  mode: Mode
+  question?: string
+  runtimeFiles: RuntimeFiles
+  sessionId: string
+  sessionName: string
+}): AdviserSessionState => ({
+  schemaVersion: 1,
+  cwd,
+  mode,
+  sessionId,
+  sessionName,
+  runtimeFiles,
+  lastQuestion: question,
+  createdAt: new Date().toISOString(),
+})
+
+const writeSessionState = async (state: AdviserSessionState) => {
+  await writeFile(state.runtimeFiles.statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+}
+
+const readSessionState = async (statePath: string) => {
+  const state = JSON.parse(await readFile(statePath, 'utf8')) as AdviserSessionState
+  if (state.schemaVersion !== 1) throw new Error(`Unsupported Claude TUI adviser session state at ${statePath}.`)
+  return state
+}
+
+export const runAdviser = async ({
+  cwd = process.cwd(),
+  hardTimeoutMs,
+  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+  input,
+  mode,
+  timeoutMs,
+}: {
   mode: Mode
   input: string
   timeoutMs: number
+  idleTimeoutMs?: number
+  hardTimeoutMs?: number
   cwd?: string
 }) => {
-  const deadlineMs = Date.now() + timeoutMs
+  const hardTimeoutAtMs = hardTimeoutMs === undefined ? undefined : Date.now() + hardTimeoutMs
+  let keepSession = false
   await assertRuntimeBinary({
     command: 'tmux',
     args: ['-V'],
     label: '`tmux`',
-    timeoutMs: remainingTimeoutMs(deadlineMs),
+    timeoutMs: commandTimeoutMs(hardTimeoutAtMs),
   })
   await assertRuntimeBinary({
     command: 'claude',
     args: ['--version'],
     label: 'Claude Code CLI `claude`',
-    timeoutMs: remainingTimeoutMs(deadlineMs),
+    timeoutMs: commandTimeoutMs(hardTimeoutAtMs),
   })
 
   const sessionId = randomUUID()
@@ -586,20 +841,73 @@ export const runAdviser = async ({ mode, input, timeoutMs, cwd = process.cwd() }
   await writeFile(runtimeFiles.promptPath, prompt, 'utf8')
 
   try {
-    return await runAdviserSession({ cwd, deadlineMs, mode, runtimeFiles, sessionId, sessionName })
+    const result = await runAdviserSession({
+      cwd,
+      hardTimeoutMs,
+      healthCheckIntervalMs: timeoutMs,
+      idleTimeoutMs,
+      mode,
+      runtimeFiles,
+      sessionId,
+      sessionName,
+    })
+    keepSession = result.status === 'needs_input'
+    return result
   } catch (error) {
     throw await appendTmuxPaneToError({ error, sessionName })
   } finally {
-    await killTmuxSession(sessionName)
-    await cleanupRuntimeFiles(runtimeFiles.runtimeDir)
+    if (!keepSession) {
+      await killTmuxSession(sessionName)
+      await cleanupRuntimeFiles(runtimeFiles.runtimeDir)
+    }
   }
 }
 
-const captureTmuxPane = async (sessionName: string) => {
+const runAdviserResume = async ({
+  answer,
+  hardTimeoutMs,
+  idleTimeoutMs,
+  mode,
+  resumeFile,
+  timeoutMs,
+}: {
+  answer: string
+  hardTimeoutMs?: number
+  idleTimeoutMs: number
+  mode: Mode
+  resumeFile: string
+  timeoutMs: number
+}) => {
+  const state = await readSessionState(resumeFile)
+  if (state.mode !== mode) throw new Error(`Claude TUI adviser session state is for ${state.mode}, not ${mode}.`)
+
+  let keepSession = false
+  try {
+    const result = await resumeAdviserSession({
+      answer,
+      hardTimeoutMs,
+      healthCheckIntervalMs: timeoutMs,
+      idleTimeoutMs,
+      state,
+    })
+    keepSession = result.status === 'needs_input'
+    return result
+  } catch (error) {
+    throw await appendTmuxPaneToError({ error, sessionName: state.sessionName })
+  } finally {
+    if (!keepSession) {
+      await killTmuxSession(state.sessionName)
+      await cleanupRuntimeFiles(state.runtimeFiles.runtimeDir)
+    }
+  }
+}
+
+const captureTmuxPane = async (sessionName: string, timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS) => {
   try {
     const { stdout } = await execCommand({
       command: 'tmux',
       args: ['capture-pane', '-p', '-t', sessionName],
+      timeoutMs,
     })
     return stdout.trim()
   } catch {
@@ -607,20 +915,21 @@ const captureTmuxPane = async (sessionName: string) => {
   }
 }
 
-const createPaneStreamer = ({ sessionName }: {
+const createPaneStreamer = ({ onActivity, sessionName }: {
   sessionName: string
+  onActivity?: () => void
 }) => {
   if (!isPaneStreamingEnabled()) return { stop: () => undefined }
 
   let lastFingerprint = ''
   let lastStreamedAt = 0
   const streamPane = async () => {
-    const pane = await captureTmuxPane(sessionName)
-    if (pane === null) return
-    const snapshot = paneStreamSnapshot(pane)
-    const fingerprint = paneStreamFingerprint(snapshot)
+    const snapshot = await capturePaneStreamSnapshot(sessionName)
+    if (snapshot === null) return
     const now = Date.now()
-    if (fingerprint === lastFingerprint && now - lastStreamedAt < PANE_STREAM_HEARTBEAT_MS) return
+    const fingerprint = paneStreamFingerprint(snapshot)
+    recordPaneStreamActivity({ fingerprint, lastFingerprint, onActivity })
+    if (!shouldStreamPane({ fingerprint, lastFingerprint, lastStreamedAt, now })) return
     lastFingerprint = fingerprint
     lastStreamedAt = now
     process.stderr.write(`\n[${sessionName} pane]\n${snapshot}\n`)
@@ -632,6 +941,182 @@ const createPaneStreamer = ({ sessionName }: {
   void streamPane()
   return {
     stop: () => clearInterval(interval),
+  }
+}
+
+const capturePaneStreamSnapshot = async (sessionName: string) => {
+  const pane = await captureTmuxPane(sessionName)
+  return pane === null ? null : paneStreamSnapshot(pane)
+}
+
+const recordPaneStreamActivity = ({ fingerprint, lastFingerprint, onActivity }: {
+  fingerprint: string
+  lastFingerprint: string
+  onActivity?: () => void
+}) => {
+  if (isNewPaneActivity({ fingerprint, lastFingerprint })) {
+    onActivity?.()
+  }
+}
+
+const isNewPaneActivity = ({ fingerprint, lastFingerprint }: {
+  fingerprint: string
+  lastFingerprint: string
+}) => fingerprint !== '' && fingerprint !== lastFingerprint
+
+const shouldStreamPane = ({ fingerprint, lastFingerprint, lastStreamedAt, now }: {
+  fingerprint: string
+  lastFingerprint: string
+  lastStreamedAt: number
+  now: number
+}) => fingerprint !== lastFingerprint || now - lastStreamedAt >= PANE_STREAM_HEARTBEAT_MS
+
+const inspectTmuxPaneState = async ({ sessionName, timeoutMs }: {
+  sessionName: string
+  timeoutMs: number
+}) => {
+  await assertTmuxSessionExists({ sessionName, timeoutMs })
+  assertTmuxPaneIsAlive(await readTmuxPaneState({ sessionName, timeoutMs }))
+}
+
+const assertTmuxSessionExists = async ({ sessionName, timeoutMs }: {
+  sessionName: string
+  timeoutMs: number
+}) => {
+  try {
+    await execCommand({ command: 'tmux', args: ['has-session', '-t', sessionName], timeoutMs })
+  } catch {
+    throw new Error('Claude TUI adviser tmux session disappeared before producing a handoff.')
+  }
+}
+
+const readTmuxPaneState = async ({ sessionName, timeoutMs }: {
+  sessionName: string
+  timeoutMs: number
+}) => {
+  const { stdout } = await execCommand({
+    command: 'tmux',
+    args: ['display-message', '-p', '-t', sessionName, '#{pane_dead} #{pane_current_command}'],
+    timeoutMs,
+  })
+  const [paneDead, currentCommand = ''] = stdout.trim().split(/\s+/)
+  return { currentCommand, paneDead }
+}
+
+const assertTmuxPaneIsAlive = ({ paneDead }: {
+  currentCommand: string
+  paneDead: string
+}) => {
+  if (paneDead === '1') throw new Error('Claude TUI adviser Claude process exited before producing a handoff.')
+}
+
+const fileActivitySignature = async (path: string) => {
+  try {
+    const entry = await stat(path)
+    return `${entry.size}:${entry.mtimeMs}`
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+const createSessionWatchdog = ({ cwd, hardTimeoutMs, healthCheckIntervalMs, idleTimeoutMs, sessionId, sessionName }: {
+  cwd: string
+  hardTimeoutMs?: number
+  healthCheckIntervalMs: number
+  idleTimeoutMs: number
+  sessionId: string
+  sessionName: string
+}): SessionWatchdog => {
+  const startedAtMs = Date.now()
+  const hardTimeoutAtMs = hardTimeoutMs === undefined ? undefined : startedAtMs + hardTimeoutMs
+  const activityCheckIntervalMs = Math.min(PANE_STREAM_POLL_MS, healthCheckIntervalMs)
+  const transcriptStates = new Map<string, string>()
+  let lastActivityAtMs = startedAtMs
+  let lastPaneFingerprint = ''
+  let nextActivityCheckAtMs = startedAtMs
+  let nextHealthCheckAtMs = startedAtMs + healthCheckIntervalMs
+
+  const markActivity = () => {
+    lastActivityAtMs = Date.now()
+  }
+
+  const commandTimeout = () => commandTimeoutMs(hardTimeoutAtMs)
+
+  const recordPaneActivity = async () => {
+    const pane = await captureTmuxPane(sessionName, commandTimeout())
+    if (pane === null) return
+    const fingerprint = paneStreamFingerprint(paneStreamSnapshot(pane))
+    if (fingerprint !== '' && fingerprint !== lastPaneFingerprint) markActivity()
+    lastPaneFingerprint = fingerprint
+  }
+
+  const recordTranscriptActivity = async () => {
+    const paths = deterministicTranscriptPaths({ cwd, sessionId, claudeHome: claudeHomePath() })
+    for (const path of paths) {
+      const signature = await fileActivitySignature(path)
+      if (signature === null) continue
+      const previousSignature = transcriptStates.get(path)
+      if (previousSignature !== signature) markActivity()
+      transcriptStates.set(path, signature)
+    }
+  }
+
+  const inspectActivity = async () => {
+    await inspectTmuxPaneState({ sessionName, timeoutMs: commandTimeout() })
+    await recordPaneActivity()
+    await recordTranscriptActivity()
+  }
+
+  const check = async () => {
+    const now = Date.now()
+    assertHardTimeout({ hardTimeoutAtMs, now })
+    if (isDue({ nextAtMs: nextActivityCheckAtMs, now })) {
+      await inspectActivity()
+      nextActivityCheckAtMs = now + activityCheckIntervalMs
+    }
+    assertIdleTimeout({ idleTimeoutMs, lastActivityAtMs, now })
+    if (isDue({ nextAtMs: nextHealthCheckAtMs, now })) {
+      process.stderr.write('timeout elapsed but Claude is still active; continuing to wait\n')
+      nextHealthCheckAtMs = now + healthCheckIntervalMs
+    }
+  }
+
+  const pollDelayMs = () => {
+    const now = Date.now()
+    return Math.max(1, Math.min(
+      HOOK_POLL_MS,
+      nextActivityCheckAtMs - now,
+      nextHealthCheckAtMs - now,
+      lastActivityAtMs + idleTimeoutMs - now,
+      hardTimeoutAtMs === undefined ? HOOK_POLL_MS : hardTimeoutAtMs - now,
+    ))
+  }
+
+  return { check, commandTimeoutMs: commandTimeout, markActivity, pollDelayMs }
+}
+
+const isDue = ({ nextAtMs, now }: {
+  nextAtMs: number
+  now: number
+}) => now >= nextAtMs
+
+const assertHardTimeout = ({ hardTimeoutAtMs, now }: {
+  hardTimeoutAtMs?: number
+  now: number
+}) => {
+  if (hardTimeoutAtMs !== undefined && now >= hardTimeoutAtMs) {
+    throw new Error('Claude TUI adviser reached the configured hard timeout before producing a handoff.')
+  }
+}
+
+const assertIdleTimeout = ({ idleTimeoutMs, lastActivityAtMs, now }: {
+  idleTimeoutMs: number
+  lastActivityAtMs: number
+  now: number
+}) => {
+  if (now - lastActivityAtMs >= idleTimeoutMs) {
+    throw new Error(`Claude TUI adviser was idle for ${idleTimeoutMs}ms before producing a handoff.`)
   }
 }
 
@@ -675,14 +1160,33 @@ const cleanupRuntimeFiles = async (runtimeDir: string) => {
   }
 }
 
-const runAdviserSession = async ({ cwd, deadlineMs, mode, runtimeFiles, sessionId, sessionName }: {
+const runAdviserSession = async ({
+  cwd,
+  hardTimeoutMs,
+  healthCheckIntervalMs,
+  idleTimeoutMs,
+  mode,
+  runtimeFiles,
+  sessionId,
+  sessionName,
+}: {
   cwd: string
-  deadlineMs: number
+  hardTimeoutMs?: number
+  healthCheckIntervalMs: number
+  idleTimeoutMs: number
   mode: Mode
   runtimeFiles: RuntimeFiles
   sessionId: string
   sessionName: string
 }) => {
+  const watchdog = createSessionWatchdog({
+    cwd,
+    hardTimeoutMs,
+    healthCheckIntervalMs,
+    idleTimeoutMs,
+    sessionId,
+    sessionName,
+  })
   const { command, args } = buildTmuxStartInvocation({
     cwd,
     mode,
@@ -690,27 +1194,107 @@ const runAdviserSession = async ({ cwd, deadlineMs, mode, runtimeFiles, sessionI
     sessionName,
     settingsPath: runtimeFiles.settingsPath,
   })
-  await execCommand({ command, args, cwd, timeoutMs: remainingTimeoutMs(deadlineMs) })
-  const paneStreamer = createPaneStreamer({ sessionName })
+  await execCommand({ command, args, cwd, timeoutMs: watchdog.commandTimeoutMs() })
+  const paneStreamer = createPaneStreamer({ onActivity: watchdog.markActivity, sessionName })
   try {
-    await waitForHookEvent({ deadlineMs, event: 'SessionStart', eventLogPath: runtimeFiles.eventLogPath })
-    await submitPromptToClaudeTui({ deadlineMs, promptPath: runtimeFiles.promptPath, sessionName })
-    const stopEvent = await waitForHookEvent({ deadlineMs, event: 'Stop', eventLogPath: runtimeFiles.eventLogPath })
-    const answer = await waitForTranscriptAnswer({ cwd, deadlineMs, sessionId, stopEvent })
+    await waitForHookEvent({ event: 'SessionStart', eventLogPath: runtimeFiles.eventLogPath, watchdog })
+    await submitPromptToClaudeTui({ promptPath: runtimeFiles.promptPath, sessionName, watchdog })
+    const result = await waitForStopOrQuestion({ cwd, eventLogPath: runtimeFiles.eventLogPath, sessionId, watchdog })
+    if (result.kind === 'question') {
+      await writeSessionState(sessionState({
+        cwd,
+        mode,
+        question: result.question,
+        runtimeFiles,
+        sessionId,
+        sessionName,
+      }))
+      return buildQuestionHandoff({
+        cwd,
+        mode,
+        question: result.question,
+        sessionId,
+        sessionName,
+        statePath: runtimeFiles.statePath,
+      })
+    }
+
+    const answer = await waitForTranscriptAnswer({ cwd, sessionId, stopEvent: result.stopEvent, watchdog })
     return buildHandoff({ answer, cwd, mode, sessionId })
   } finally {
     paneStreamer.stop()
   }
 }
 
-const submitPromptToClaudeTui = async ({ deadlineMs, promptPath, sessionName }: {
-  deadlineMs: number
+const resumeAdviserSession = async ({ answer, hardTimeoutMs, healthCheckIntervalMs, idleTimeoutMs, state }: {
+  answer: string
+  hardTimeoutMs?: number
+  healthCheckIntervalMs: number
+  idleTimeoutMs: number
+  state: AdviserSessionState
+}) => {
+  const watchdog = createSessionWatchdog({
+    cwd: state.cwd,
+    hardTimeoutMs,
+    healthCheckIntervalMs,
+    idleTimeoutMs,
+    sessionId: state.sessionId,
+    sessionName: state.sessionName,
+  })
+  const paneStreamer = createPaneStreamer({ onActivity: watchdog.markActivity, sessionName: state.sessionName })
+  try {
+    await inspectTmuxPaneState({ sessionName: state.sessionName, timeoutMs: watchdog.commandTimeoutMs() })
+    await writeFile(state.runtimeFiles.promptPath, buildClaudeAnswer(answer), 'utf8')
+    await submitPromptToClaudeTui({
+      promptPath: state.runtimeFiles.promptPath,
+      sessionName: state.sessionName,
+      watchdog,
+    })
+    const result = await waitForStopOrQuestion({
+      cwd: state.cwd,
+      eventLogPath: state.runtimeFiles.eventLogPath,
+      ignoredQuestion: state.lastQuestion,
+      sessionId: state.sessionId,
+      watchdog,
+    })
+    if (result.kind === 'question') {
+      await writeSessionState({ ...state, lastQuestion: result.question })
+      return buildQuestionHandoff({
+        cwd: state.cwd,
+        mode: state.mode,
+        question: result.question,
+        sessionId: state.sessionId,
+        sessionName: state.sessionName,
+        statePath: state.runtimeFiles.statePath,
+      })
+    }
+
+    const finalAnswer = await waitForTranscriptAnswer({
+      cwd: state.cwd,
+      sessionId: state.sessionId,
+      stopEvent: result.stopEvent,
+      watchdog,
+    })
+    return buildHandoff({ answer: finalAnswer, cwd: state.cwd, mode: state.mode, sessionId: state.sessionId })
+  } finally {
+    paneStreamer.stop()
+  }
+}
+
+const buildClaudeAnswer = (answer: string) => [
+  'Codex answer to your clarification question:',
+  '',
+  answer.trim() === '' ? '(No additional answer was provided.)' : answer.trim(),
+].join('\n')
+
+const submitPromptToClaudeTui = async ({ promptPath, sessionName, watchdog }: {
   promptPath: string
   sessionName: string
+  watchdog: SessionWatchdog
 }) => {
   const bufferName = `${sessionName}-prompt`
   for (const { command, args } of buildTmuxPromptSubmissionInvocations({ bufferName, promptPath, sessionName })) {
-    await execCommand({ command, args, timeoutMs: remainingTimeoutMs(deadlineMs) })
+    await execCommand({ command, args, timeoutMs: watchdog.commandTimeoutMs() })
   }
 }
 
@@ -731,7 +1315,7 @@ export const classifyLaunchFailure = (error: unknown) => {
     [/requires `?tmux`? on PATH|spawn tmux ENOENT/, 'Claude TUI adviser requires `tmux` on PATH.'],
     [/requires Claude Code CLI(?: `?claude`?)? on PATH|spawn claude ENOENT/, 'Claude TUI adviser requires `claude` on PATH.'],
     [/Please run \/login|Invalid authentication credentials/, 'Claude TUI adviser requires Claude authentication. Run `claude /login`.'],
-    [/timed out waiting for (?:SessionStart|Stop)|timed out after/, 'Claude TUI adviser timed out before producing a handoff.'],
+    [/timed out waiting for (?:SessionStart|Stop)|timed out after|was idle|hard timeout|tmux session disappeared|Claude process exited/, 'Claude TUI adviser timed out before producing a handoff.'],
     [/could not find a final assistant answer/, 'Claude TUI adviser could not find a final assistant answer in the Claude transcript.'],
   ] satisfies [RegExp, string][]).find(([pattern]) => pattern.test(message))
 
@@ -739,9 +1323,23 @@ export const classifyLaunchFailure = (error: unknown) => {
 }
 
 const main = async () => {
-  const { mode, prompt, promptFile, timeoutMs } = parseArgs(process.argv.slice(2))
-  const input = await readInput({ prompt, promptFile })
-  const handoff = await runAdviser({ mode, input, timeoutMs })
+  const { answer, answerFile, hardTimeoutMs, idleTimeoutMs, mode, prompt, promptFile, resumeFile, timeoutMs } = parseArgs(process.argv.slice(2))
+  const handoff = resumeFile === undefined
+    ? await runAdviser({
+        hardTimeoutMs,
+        idleTimeoutMs,
+        mode,
+        input: await readInput({ prompt, promptFile }),
+        timeoutMs,
+      })
+    : await runAdviserResume({
+        answer: await readAnswer({ answer, answerFile }),
+        hardTimeoutMs,
+        idleTimeoutMs,
+        mode,
+        resumeFile,
+        timeoutMs,
+      })
   process.stdout.write(`${JSON.stringify(handoff, null, 2)}\n`)
 }
 

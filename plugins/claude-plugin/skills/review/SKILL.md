@@ -8,6 +8,10 @@ description: User-invoked only. Use when the user explicitly asks Codex to ask C
 Use Claude CLI as an external reviewer for current changes. Codex remains
 responsible for triage, verification, and deciding whether findings are real.
 
+Treat this as an interactive background review, not a fire-and-forget command.
+Report concise progress to the user while Claude is running, using streamed
+tmux pane snapshots and the eventual JSON handoff as evidence.
+
 ## Workflow
 
 1. Determine the review scope: uncommitted changes by default, or the branch
@@ -34,16 +38,31 @@ node <plugin-root>/scripts/claude-tui-adviser.mjs review --prompt "<prompt>"
    waiting for Claude `SessionStart` readiness, waiting for the `Stop` hook, and
    extracting the final answer from Claude's persisted transcript. It streams
    bounded tmux pane snapshots to stderr by default so Codex and the user can
-   see what Claude is doing while stdout remains the final handoff JSON. Run this command
-   outside Codex's default sandbox. It invokes `tmux` and the local Claude TUI,
-   which may need PTY support, Claude auth, keychain/session files, and
-   home-directory access that the sandbox can block. In Codex, use the shell
-   tool's escalation or approval path for this helper command instead of
-   retrying inside the default workspace sandbox.
+   see what Claude is doing while stdout remains the handoff JSON. If
+   Claude asks a blocking clarification question, the helper returns a
+   `status: "needs_input"` handoff with `question`, `statePath`,
+   `attachCommand`, and `resumeCommand`, and leaves the tmux session alive.
+   Run this command outside Codex's default sandbox. It invokes `tmux` and the
+   local Claude TUI, which may need PTY support, Claude auth, keychain/session
+   files, and home-directory access that the sandbox can block. In Codex, use
+   the shell tool's escalation or approval path for this helper command instead
+   of retrying inside the default workspace sandbox.
 3. Ask Claude to review for correctness, regressions, missed tests, public API
    or behavior changes, and risky edge cases. Tell it not to edit files.
-4. Check each finding against the actual repo before presenting or acting on it.
-5. Present Claude's review only after triage:
+4. If the handoff has `status: "needs_input"`, decide whether Codex can answer
+   from the current diff, repo context, or the user's request. If yes, continue
+   the same Claude session:
+
+```bash
+codex-claude-review --resume "<statePath>" --answer "<Codex answer>"
+```
+
+   If answering would require user intent or product judgment, stop and forward
+   Claude's question to the user. After the user answers, resume the same
+   Claude session with `--answer` or `--answer-file`. Mention that the user can
+   inspect the live interaction with the returned `attachCommand`.
+5. Check each finding against the actual repo before presenting or acting on it.
+6. Present Claude's review only after triage:
    - Claude's review summary
    - confirmed actionable findings
    - uncertain or rejected findings
@@ -62,10 +81,14 @@ Scope:
 Please inspect the repository and current diff as needed. Return only actionable
 findings ordered by severity. Focus on bugs, regressions, missed tests, and
 contract drift. Mark uncertain findings separately. Do not edit files.
+
+If you are blocked by missing requirements, ask exactly one clarification
+question starting with `QUESTION_FOR_CODEX:` and wait for Codex to answer.
 ```
 
 ## Failure Handling
 
-If `tmux` or `claude` is unavailable, Claude is not authenticated, the TUI times
-out, or the helper fails even outside the sandbox, report the failure and
-continue with Codex's own review instead of blocking.
+If `tmux` or `claude` is unavailable, Claude is not authenticated, the TUI is
+idle past its configured idle timeout, or the helper fails even outside the
+sandbox, report the failure and continue with Codex's own review instead of
+blocking.

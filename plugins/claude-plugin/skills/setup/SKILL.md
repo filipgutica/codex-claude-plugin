@@ -48,6 +48,11 @@ prefix_rule(pattern=["codex-claude-plan-stream"], decision="allow")
    trusting a shell pipeline. The wrappers stream bounded Claude tmux pane
    snapshots by default for visibility during long-running plan/review runs; set
    `CODEX_CLAUDE_STREAM_PANE=0` only when the user explicitly wants a quiet run.
+   If Claude asks a blocking clarification question, Codex can resume the same
+   tmux session through the same wrapper with `--resume <statePath> --answer
+   <text>`.
+   `CODEX_CLAUDE_IDLE_TIMEOUT_MS` tunes the no-activity timeout, and
+   `CODEX_CLAUDE_HARD_TIMEOUT_MS` adds an absolute cap only when one is needed.
 
 5. Remind the user to restart Codex after editing `default.rules`.
 

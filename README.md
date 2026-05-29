@@ -19,6 +19,12 @@ Claude output is advisory only. Codex must validate the handoff against repo
 reality before acting on it, and Codex remains responsible for scope,
 correctness, and implementation decisions.
 
+The intended workflow is interactive. Codex runs Claude in the background
+through the local TUI and tmux, reports progress from the streamed pane output,
+and folds Claude's final handoff into Codex's own plan or review. If Claude asks
+a blocking clarification question, Codex can answer from verified context or
+forward the question to the user, then resume the same Claude session.
+
 ## Repo Layout
 
 ```text
@@ -98,10 +104,13 @@ The Claude adviser helper intentionally avoids `claude -p` and external PTY
 wrappers. It runs the authenticated local Claude CLI in interactive mode inside
 a required local `tmux` session, waits for Claude lifecycle hooks, reads the
 final assistant answer from Claude's persisted transcript, and normalizes that
-result into a Codex handoff. If Codex sandboxing blocks `tmux`, Claude auth,
-keychain access, session files, or TUI startup, run the helper outside the
-default sandbox and let Codex continue with its own plan or review if the
-handoff fails.
+result into a Codex handoff. When Claude asks a clarification question with the
+structured `QUESTION_FOR_CODEX:` prefix, the helper returns a `needs_input`
+handoff with the question, a tmux attach command for inspection, and resume
+state for continuing the same Claude session. If Codex sandboxing blocks
+`tmux`, Claude auth, keychain access, session files, or TUI startup, run the
+helper outside the default sandbox and let Codex continue with its own plan or
+review if the handoff fails.
 
 Runtime requirements:
 
@@ -127,8 +136,23 @@ runtime. Skills invoke these wrappers directly with `--prompt` or
 `--prompt-file`, so the trusted command is the wrapper itself rather than a
 shell pipeline. The helper streams bounded Claude tmux pane snapshots to stderr
 by default for visibility during long-running reviews and plans; stdout remains
-the final handoff JSON. Set `CODEX_CLAUDE_STREAM_PANE=0` to disable pane
-streaming.
+the handoff JSON. Set `CODEX_CLAUDE_STREAM_PANE=0` to disable pane
+streaming. If the JSON handoff has `status: "needs_input"`, answer Claude and
+continue the same session with:
+
+```sh
+codex-claude-plan --resume "<statePath>" --answer "<answer>"
+codex-claude-review --resume "<statePath>" --answer "<answer>"
+```
+
+The handoff also includes `attachCommand`, which opens the live tmux session for
+inspection while Claude is waiting. `--timeout-ms` is a health-check interval:
+when it elapses, the
+helper checks tmux, Claude pane state, and transcript activity before deciding
+whether to continue. Active Claude runs continue by default. Set
+`--idle-timeout-ms` or `CODEX_CLAUDE_IDLE_TIMEOUT_MS` to tune how long a run may
+go without detectable activity, and set `--hard-timeout-ms` or
+`CODEX_CLAUDE_HARD_TIMEOUT_MS` only when an absolute cap is required.
 
 To remove the wrapper commands later, run `$claude-plugin:setup` with the
 uninstall workflow, or run the installed setup script with `--uninstall`.
