@@ -1,3 +1,10 @@
+## [0.13.1](https://github.com/filipgutica/codex-claude-plugin/compare/v0.13.0...v0.13.1) (2026-05-29)
+
+
+### Bug Fixes
+
+* remove redundant stream wrappers ([224be7a](https://github.com/filipgutica/codex-claude-plugin/commit/224be7a9d1c5229732992523ef95b369af2f31eb))
+
 # [0.13.0](https://github.com/filipgutica/codex-claude-plugin/compare/v0.12.1...v0.13.0) (2026-05-29)
 
 
