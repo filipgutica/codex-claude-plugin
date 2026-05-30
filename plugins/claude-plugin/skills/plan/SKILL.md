@@ -11,7 +11,9 @@ final plan, scope control, and deciding what to implement.
 
 Treat this as an interactive background collaboration, not a fire-and-forget
 command. Report concise progress to the user while Claude is running, using the
-streamed tmux pane snapshots and eventual JSON handoff as evidence.
+streamed tmux pane snapshots and eventual JSON handoff as evidence. Do not stop
+a live Claude session just because it appears slow or stuck in a long progress
+state; ask the user before stopping a live session for time or cost reasons.
 
 ## Workflow
 
@@ -89,7 +91,7 @@ question starting with `QUESTION_FOR_CODEX:` and wait for Codex to answer.
 
 ## Failure Handling
 
-If `tmux` or `claude` is unavailable, Claude is not authenticated, the TUI is
-idle past its configured idle timeout, or the helper fails even outside the
-sandbox, report the failure and continue with Codex's own planning instead of
-blocking.
+If `tmux` or `claude` is unavailable, Claude is not authenticated, the TUI exits
+or disappears before producing a handoff, a configured hard timeout is reached,
+or the helper fails even outside the sandbox, report the failure and continue
+with Codex's own planning instead of blocking.

@@ -704,7 +704,7 @@ const fileActivitySignature = async (path) => {
         throw error;
     }
 };
-const createSessionWatchdog = ({ cwd, hardTimeoutMs, healthCheckIntervalMs, idleTimeoutMs, sessionId, sessionName }) => {
+const createSessionWatchdog = ({ cwd, hardTimeoutMs, healthCheckIntervalMs, sessionId, sessionName }) => {
     const startedAtMs = Date.now();
     const hardTimeoutAtMs = hardTimeoutMs === undefined ? undefined : startedAtMs + hardTimeoutMs;
     const activityCheckIntervalMs = Math.min(PANE_STREAM_POLL_MS, healthCheckIntervalMs);
@@ -750,15 +750,14 @@ const createSessionWatchdog = ({ cwd, hardTimeoutMs, healthCheckIntervalMs, idle
             await inspectActivity();
             nextActivityCheckAtMs = now + activityCheckIntervalMs;
         }
-        assertIdleTimeout({ idleTimeoutMs, lastActivityAtMs, now });
         if (isDue({ nextAtMs: nextHealthCheckAtMs, now })) {
-            process.stderr.write('timeout elapsed but Claude is still active; continuing to wait\n');
+            process.stderr.write('Claude is still running; continuing to wait for the handoff\n');
             nextHealthCheckAtMs = now + healthCheckIntervalMs;
         }
     };
     const pollDelayMs = () => {
         const now = Date.now();
-        return Math.max(1, Math.min(HOOK_POLL_MS, nextActivityCheckAtMs - now, nextHealthCheckAtMs - now, lastActivityAtMs + idleTimeoutMs - now, hardTimeoutAtMs === undefined ? HOOK_POLL_MS : hardTimeoutAtMs - now));
+        return Math.max(1, Math.min(HOOK_POLL_MS, nextActivityCheckAtMs - now, nextHealthCheckAtMs - now, hardTimeoutAtMs === undefined ? HOOK_POLL_MS : hardTimeoutAtMs - now));
     };
     return { check, commandTimeoutMs: commandTimeout, markActivity, pollDelayMs };
 };
@@ -766,11 +765,6 @@ const isDue = ({ nextAtMs, now }) => now >= nextAtMs;
 const assertHardTimeout = ({ hardTimeoutAtMs, now }) => {
     if (hardTimeoutAtMs !== undefined && now >= hardTimeoutAtMs) {
         throw new Error('Claude TUI adviser reached the configured hard timeout before producing a handoff.');
-    }
-};
-const assertIdleTimeout = ({ idleTimeoutMs, lastActivityAtMs, now }) => {
-    if (now - lastActivityAtMs >= idleTimeoutMs) {
-        throw new Error(`Claude TUI adviser was idle for ${idleTimeoutMs}ms before producing a handoff.`);
     }
 };
 export const paneStreamSnapshot = (pane) => pane
@@ -815,7 +809,6 @@ const runAdviserSession = async ({ cwd, hardTimeoutMs, healthCheckIntervalMs, id
         cwd,
         hardTimeoutMs,
         healthCheckIntervalMs,
-        idleTimeoutMs,
         sessionId,
         sessionName,
     });
@@ -862,7 +855,6 @@ const resumeAdviserSession = async ({ answer, hardTimeoutMs, healthCheckInterval
         cwd: state.cwd,
         hardTimeoutMs,
         healthCheckIntervalMs,
-        idleTimeoutMs,
         sessionId: state.sessionId,
         sessionName: state.sessionName,
     });

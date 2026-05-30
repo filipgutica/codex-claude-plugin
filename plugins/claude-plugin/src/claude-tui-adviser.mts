@@ -1020,11 +1020,10 @@ const fileActivitySignature = async (path: string) => {
   }
 }
 
-const createSessionWatchdog = ({ cwd, hardTimeoutMs, healthCheckIntervalMs, idleTimeoutMs, sessionId, sessionName }: {
+const createSessionWatchdog = ({ cwd, hardTimeoutMs, healthCheckIntervalMs, sessionId, sessionName }: {
   cwd: string
   hardTimeoutMs?: number
   healthCheckIntervalMs: number
-  idleTimeoutMs: number
   sessionId: string
   sessionName: string
 }): SessionWatchdog => {
@@ -1075,9 +1074,8 @@ const createSessionWatchdog = ({ cwd, hardTimeoutMs, healthCheckIntervalMs, idle
       await inspectActivity()
       nextActivityCheckAtMs = now + activityCheckIntervalMs
     }
-    assertIdleTimeout({ idleTimeoutMs, lastActivityAtMs, now })
     if (isDue({ nextAtMs: nextHealthCheckAtMs, now })) {
-      process.stderr.write('timeout elapsed but Claude is still active; continuing to wait\n')
+      process.stderr.write('Claude is still running; continuing to wait for the handoff\n')
       nextHealthCheckAtMs = now + healthCheckIntervalMs
     }
   }
@@ -1088,7 +1086,6 @@ const createSessionWatchdog = ({ cwd, hardTimeoutMs, healthCheckIntervalMs, idle
       HOOK_POLL_MS,
       nextActivityCheckAtMs - now,
       nextHealthCheckAtMs - now,
-      lastActivityAtMs + idleTimeoutMs - now,
       hardTimeoutAtMs === undefined ? HOOK_POLL_MS : hardTimeoutAtMs - now,
     ))
   }
@@ -1107,16 +1104,6 @@ const assertHardTimeout = ({ hardTimeoutAtMs, now }: {
 }) => {
   if (hardTimeoutAtMs !== undefined && now >= hardTimeoutAtMs) {
     throw new Error('Claude TUI adviser reached the configured hard timeout before producing a handoff.')
-  }
-}
-
-const assertIdleTimeout = ({ idleTimeoutMs, lastActivityAtMs, now }: {
-  idleTimeoutMs: number
-  lastActivityAtMs: number
-  now: number
-}) => {
-  if (now - lastActivityAtMs >= idleTimeoutMs) {
-    throw new Error(`Claude TUI adviser was idle for ${idleTimeoutMs}ms before producing a handoff.`)
   }
 }
 
@@ -1183,7 +1170,6 @@ const runAdviserSession = async ({
     cwd,
     hardTimeoutMs,
     healthCheckIntervalMs,
-    idleTimeoutMs,
     sessionId,
     sessionName,
   })
@@ -1237,7 +1223,6 @@ const resumeAdviserSession = async ({ answer, hardTimeoutMs, healthCheckInterval
     cwd: state.cwd,
     hardTimeoutMs,
     healthCheckIntervalMs,
-    idleTimeoutMs,
     sessionId: state.sessionId,
     sessionName: state.sessionName,
   })

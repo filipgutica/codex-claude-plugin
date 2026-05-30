@@ -144,6 +144,23 @@ const writeFakeQuestion = ({ cwd, sessionId }) => {
   })}\n`)
 }
 
+const expectCompletedReviewHandoff = (handoff) => {
+  expect(handoff).toMatchObject({
+    ok: true,
+    schemaVersion: 1,
+    mode: 'review',
+    cwd: '/repo',
+    source: 'claude-tui',
+    answer: 'Keep waiting.',
+  })
+}
+
+const expectContinuingLog = (stderrWrite) => {
+  expect(stderrWrite.mock.calls.map(([chunk]) => String(chunk)).join('')).toContain(
+    'Claude is still running; continuing to wait for the handoff',
+  )
+}
+
 describe('Claude session orchestration', () => {
   beforeEach(() => {
     spawnMock.mockReset()
@@ -172,26 +189,40 @@ describe('Claude session orchestration', () => {
         cwd: '/repo',
       })
 
-      expect(handoff).toMatchObject({
-        ok: true,
-        schemaVersion: 1,
-        mode: 'review',
-        cwd: '/repo',
-        source: 'claude-tui',
-        answer: 'Keep waiting.',
-      })
-      expect(stderrWrite.mock.calls.map(([chunk]) => String(chunk)).join('')).toContain(
-        'timeout elapsed but Claude is still active; continuing to wait',
-      )
+      expectCompletedReviewHandoff(handoff)
+      expectContinuingLog(stderrWrite)
     } finally {
       stderrWrite.mockRestore()
     }
   })
 
-  it('fails when Claude has no detectable activity for the idle timeout', async () => {
+  it('continues waiting when a live Claude pane has no detectable activity', async () => {
+    installFakeRuntime({
+      handoffDelayMs: 70,
+      paneOutputs: ['✳ Churning... (1m 3s · ↓ 1.8k tokens · almost done thinking with high effort)'],
+    })
+    const stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    try {
+      const handoff = await runtime.runAdviser({
+        mode: 'review',
+        input: 'Review current changes.',
+        timeoutMs: 20,
+        idleTimeoutMs: 30,
+        cwd: '/repo',
+      })
+
+      expectCompletedReviewHandoff(handoff)
+      expectContinuingLog(stderrWrite)
+    } finally {
+      stderrWrite.mockRestore()
+    }
+  })
+
+  it('fails when Claude remains live past an explicit hard timeout', async () => {
     installFakeRuntime({
       handoffDelayMs: 200,
-      paneOutputs: ['No changes after startup'],
+      paneOutputs: ['✳ Churning... (1m 3s · ↓ 1.8k tokens · almost done thinking with high effort)'],
     })
     const stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
 
@@ -201,8 +232,9 @@ describe('Claude session orchestration', () => {
         input: 'Review current changes.',
         timeoutMs: 20,
         idleTimeoutMs: 30,
+        hardTimeoutMs: 50,
         cwd: '/repo',
-      })).rejects.toThrow('Claude TUI adviser was idle for 30ms before producing a handoff.')
+      })).rejects.toThrow('Claude TUI adviser reached the configured hard timeout before producing a handoff.')
     } finally {
       stderrWrite.mockRestore()
     }
