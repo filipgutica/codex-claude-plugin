@@ -145,11 +145,9 @@ codex-claude-review --resume "<statePath>" --answer "<answer>"
 
 The handoff also includes `attachCommand`, which opens the live tmux session for
 inspection while Claude is waiting. `--timeout-ms` is a health-check interval:
-when it elapses, the
-helper checks tmux, Claude pane state, and transcript activity before deciding
-whether to continue. Active Claude runs continue by default. Set
-`--idle-timeout-ms` or `CODEX_CLAUDE_IDLE_TIMEOUT_MS` to tune how long a run may
-go without detectable activity, and set `--hard-timeout-ms` or
+when it elapses, the helper checks tmux, Claude pane state, and transcript
+activity. Live Claude runs continue waiting by default, even if the pane appears
+stuck on a long progress state. Set `--hard-timeout-ms` or
 `CODEX_CLAUDE_HARD_TIMEOUT_MS` only when an absolute cap is required.
 
 To remove the wrapper commands later, run `$claude-plugin:setup` with the

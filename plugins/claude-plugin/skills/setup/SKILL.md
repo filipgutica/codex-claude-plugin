@@ -52,8 +52,9 @@ prefix_rule(pattern=["codex-claude-plan"], decision="allow")
    If Claude asks a blocking clarification question, Codex can resume the same
    tmux session through the same wrapper with `--resume <statePath> --answer
    <text>`.
-   `CODEX_CLAUDE_IDLE_TIMEOUT_MS` tunes the no-activity timeout, and
-   `CODEX_CLAUDE_HARD_TIMEOUT_MS` adds an absolute cap only when one is needed.
+   Live Claude sessions keep waiting by default, even through long progress
+   states; `CODEX_CLAUDE_HARD_TIMEOUT_MS` adds an absolute cap only when one is
+   needed.
 
 5. Remind the user to restart Codex after editing `default.rules`.
 
