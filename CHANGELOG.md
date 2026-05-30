@@ -1,3 +1,10 @@
+## [0.13.2](https://github.com/filipgutica/codex-claude-plugin/compare/v0.13.1...v0.13.2) (2026-05-30)
+
+
+### Bug Fixes
+
+* keep waiting for live claude sessions ([895bfb6](https://github.com/filipgutica/codex-claude-plugin/commit/895bfb6e75cc0897791be8f89fbf922456a50ac4))
+
 ## [0.13.1](https://github.com/filipgutica/codex-claude-plugin/compare/v0.13.0...v0.13.1) (2026-05-29)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-plugin",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "private": true,
   "type": "module",
   "repository": "https://github.com/filipgutica/codex-claude-plugin.git",
