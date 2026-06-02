@@ -71,6 +71,7 @@ const HOOK_POLL_MS = 250
 const PANE_STREAM_POLL_MS = 1000
 const PANE_STREAM_HEARTBEAT_MS = 30000
 const PANE_STREAM_MAX_LINES = 60
+const PROMPT_SUBMIT_CONFIRM_DELAY_MS = 250
 const STREAM_PANE_ENV = 'CODEX_CLAUDE_STREAM_PANE'
 const IDLE_TIMEOUT_ENV = 'CODEX_CLAUDE_IDLE_TIMEOUT_MS'
 const HARD_TIMEOUT_ENV = 'CODEX_CLAUDE_HARD_TIMEOUT_MS'
@@ -538,9 +539,11 @@ const readStopOrQuestion = async ({ cwd, eventLogPath, onActivity, sessionId, st
   recordHookActivity({ eventCount: events.length, onActivity, state })
 
   const stopEvent = events.find((entry) => entry.event === 'Stop')
+  const question = await readNewQuestion({ cwd, onActivity, sessionId, state })
+  if (question !== null) return question
   if (stopEvent !== undefined) return { kind: 'stop', stopEvent }
 
-  return readNewQuestion({ cwd, onActivity, sessionId, state })
+  return null
 }
 
 const recordHookActivity = ({ eventCount, onActivity, state }: {
@@ -1206,6 +1209,26 @@ const runAdviserSession = async ({
     }
 
     const answer = await waitForTranscriptAnswer({ cwd, sessionId, stopEvent: result.stopEvent, watchdog })
+    const question = extractCodexQuestion(answer)
+    if (question !== null) {
+      await writeSessionState(sessionState({
+        cwd,
+        mode,
+        question,
+        runtimeFiles,
+        sessionId,
+        sessionName,
+      }))
+      return buildQuestionHandoff({
+        cwd,
+        mode,
+        question,
+        sessionId,
+        sessionName,
+        statePath: runtimeFiles.statePath,
+      })
+    }
+
     return buildHandoff({ answer, cwd, mode, sessionId })
   } finally {
     paneStreamer.stop()
@@ -1260,6 +1283,19 @@ const resumeAdviserSession = async ({ answer, hardTimeoutMs, healthCheckInterval
       stopEvent: result.stopEvent,
       watchdog,
     })
+    const question = extractCodexQuestion(finalAnswer)
+    if (question !== null && question !== state.lastQuestion) {
+      await writeSessionState({ ...state, lastQuestion: question })
+      return buildQuestionHandoff({
+        cwd: state.cwd,
+        mode: state.mode,
+        question,
+        sessionId: state.sessionId,
+        sessionName: state.sessionName,
+        statePath: state.runtimeFiles.statePath,
+      })
+    }
+
     return buildHandoff({ answer: finalAnswer, cwd: state.cwd, mode: state.mode, sessionId: state.sessionId })
   } finally {
     paneStreamer.stop()
@@ -1281,7 +1317,58 @@ const submitPromptToClaudeTui = async ({ promptPath, sessionName, watchdog }: {
   for (const { command, args } of buildTmuxPromptSubmissionInvocations({ bufferName, promptPath, sessionName })) {
     await execCommand({ command, args, timeoutMs: watchdog.commandTimeoutMs() })
   }
+  await retryPromptSubmitIfStillVisible({ promptPath, sessionName, watchdog })
 }
+
+const retryPromptSubmitIfStillVisible = async ({ promptPath, sessionName, watchdog }: {
+  promptPath: string
+  sessionName: string
+  watchdog: SessionWatchdog
+}) => {
+  const prompt = await readFile(promptPath, 'utf8')
+  const snippet = promptVisibleSnippet(prompt)
+  if (snippet === null) return
+
+  await sleep(PROMPT_SUBMIT_CONFIRM_DELAY_MS)
+  await watchdog.check()
+
+  const pane = await captureTmuxPane(sessionName, watchdog.commandTimeoutMs())
+  if (pane === null || !paneTailContainsSnippet({ pane, snippet })) return
+
+  await execCommand({
+    command: 'tmux',
+    args: ['send-keys', '-t', sessionName, 'Enter'],
+    timeoutMs: watchdog.commandTimeoutMs(),
+  })
+}
+
+const promptVisibleSnippet = (prompt: string) => {
+  const candidate = prompt
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .reverse()
+    .find((line) => normalizedPromptText(line).length >= 8)
+
+  if (candidate === undefined) return null
+  const normalized = normalizedPromptText(candidate)
+  return normalized.length > 40 ? normalized.slice(-40) : normalized
+}
+
+const paneTailContainsSnippet = ({ pane, snippet }: {
+  pane: string
+  snippet: string
+}) => {
+  const lastLine = pane
+    .split('\n')
+    .map(normalizedPromptText)
+    .filter(Boolean)
+    .at(-1)
+
+  return lastLine?.includes(snippet) ?? false
+}
+
+const normalizedPromptText = (value: string) => value.replace(/\s+/g, ' ').trim()
 
 const appendTmuxPaneToError = async ({ error, sessionName }: {
   error: unknown
