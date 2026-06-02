@@ -1,3 +1,10 @@
+## [0.13.3](https://github.com/filipgutica/codex-claude-plugin/compare/v0.13.2...v0.13.3) (2026-06-02)
+
+
+### Bug Fixes
+
+* guard claude prompt submission and questions ([633a24d](https://github.com/filipgutica/codex-claude-plugin/commit/633a24dc454645bac8feebcfefd264c2b821b9d8))
+
 ## [0.13.2](https://github.com/filipgutica/codex-claude-plugin/compare/v0.13.1...v0.13.2) (2026-05-30)
 
 

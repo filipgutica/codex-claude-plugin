@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-plugin",
-  "version": "0.13.2",
+  "version": "0.13.3",
   "interface": {
     "displayName": "Codex Claude Plugin"
   },
